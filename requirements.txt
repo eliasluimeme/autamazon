@@ -1,0 +1,10 @@
+agentql
+playwright
+patchright
+loguru
+requests
+phonenumbers
+pytweening
+unidecode
+python-dotenv
+Faker

@@ -23,7 +23,7 @@ Before running this project, ensure you have the following:
 
 1.  **Clone the repository:**
     ```bash
-    git clone https://github.com/yourusername/amazon-automation.git
+    git clone https://github.com/eliasluimeme/autamazon
     cd amazon-automation
     ```
 
@@ -35,8 +35,7 @@ Before running this project, ensure you have the following:
 
 3.  **Install dependencies:**
     ```bash
-    pip install agentql playwright loguru requests
-    # If you have a requirements.txt, run: pip install -r requirements.txt
+    pip install -r requirements.txt
     ```
 
 4.  **Install Playwright browsers:**
