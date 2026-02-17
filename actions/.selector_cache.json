@@ -1,0 +1,66 @@
+{
+  "dev_reg_city": {
+    "xpath": "//*[@id=\"city\"]",
+    "timestamp": 1770247938.749398
+  },
+  "dev_reg_interest_other": {
+    "xpath": "//*[@id=\"root\"]/div/div[2]/div[6]/div[3]/div/label",
+    "timestamp": 1770248780.050878
+  },
+  "dev_reg_continue_btn": {
+    "xpath": "//*[@id=\"registrationSubmit\"]",
+    "timestamp": 1770248841.7824461
+  },
+  "dev_reg_country": {
+    "xpath": "//*[@id=\"country_code\"]/input",
+    "timestamp": 1770248261.716615
+  },
+  "dev_reg_business_name": {
+    "xpath": "//*[@id=\"company_name\"]",
+    "timestamp": 1770248267.0133681
+  },
+  "dev_reg_address_line1": {
+    "xpath": "//*[@id=\"address_line\"]",
+    "timestamp": 1770248270.5246232
+  },
+  "dev_reg_postal_code": {
+    "xpath": "//*[@id=\"postal_code\"]",
+    "timestamp": 1770248275.4168918
+  },
+  "dev_reg_state": {
+    "xpath": "//*[@id=\"state\"]",
+    "timestamp": 1770248278.3789911
+  },
+  "dev_reg_business_type": {
+    "xpath": "//*[@id=\"root\"]/div/div[2]/div[2]/div[4]/label[1]/div[2]/span",
+    "timestamp": 1770248681.188571
+  },
+  "dev_reg_customer_support_email": {
+    "xpath": "//*[@id=\"company_sup_email\"]",
+    "timestamp": 1770248344.764849
+  },
+  "dev_reg_phone": {
+    "xpath": "//*[@id=\"ap_email_login\"]",
+    "timestamp": 1770337822.867352
+  },
+  "dev_reg_same_address": {
+    "xpath": "//*[@id=\"root\"]/div/div[2]/div[4]/div[6]/div/label/div[2]/div/p",
+    "timestamp": 1770248717.16354
+  },
+  "dev_reg_use_primary_email_checkbox": {
+    "xpath": "//*[@id=\"root\"]/div/div[2]/div[4]/div[6]/div/label",
+    "timestamp": 1770249279.030037
+  },
+  "buy_now_button": {
+    "xpath": "//*[@id=\"buy-now-button\"]",
+    "timestamp": 1770324007.671215
+  },
+  "buy_now_1_click": {
+    "xpath": "//*[@id=\"limber-oneclick-button\"]",
+    "timestamp": 1771112869.2767591
+  },
+  "otp_verify_button": {
+    "xpath": "//*[@id=\"cvf-submit-otp-button\"]/span/input",
+    "timestamp": 1771082818.610521
+  }
+}

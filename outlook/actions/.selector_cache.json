@@ -1,0 +1,22 @@
+{
+  "dob_day": {
+    "xpath": "//*[@id=\"BirthDayDropdown\"]",
+    "css": null,
+    "timestamp": 1769867025.466805
+  },
+  "dob_month": {
+    "xpath": "//*[@id=\"BirthMonthDropdown\"]",
+    "css": null,
+    "timestamp": 1769867025.486486
+  },
+  "dob_year": {
+    "xpath": "//*[@id=\"floatingLabelInput23\"]",
+    "css": null,
+    "timestamp": 1769867025.508286
+  },
+  "dob_next": {
+    "xpath": "//*[@id=\"view\"]/div/div[4]/button",
+    "css": null,
+    "timestamp": 1769867025.529053
+  }
+}

@@ -1,0 +1,79 @@
+{
+  "dob_day": {
+    "xpath": "//*[@id=\"BirthDayDropdown\"]",
+    "timestamp": 1770928853.407588,
+    "metadata": {
+      "step": "dob"
+    }
+  },
+  "dob_month": {
+    "xpath": "//*[@id=\"BirthMonthDropdown\"]",
+    "timestamp": 1770928853.445815,
+    "metadata": {
+      "step": "dob"
+    }
+  },
+  "dob_year": {
+    "xpath": "//*[@id=\"floatingLabelInput23\"]",
+    "timestamp": 1771024905.772853,
+    "metadata": {
+      "step": "detect"
+    }
+  },
+  "dob_next": {
+    "xpath": "//*[@id=\"view\"]/div/div[4]/button",
+    "timestamp": 1770928853.501208,
+    "metadata": {
+      "step": "dob"
+    }
+  },
+  "name_first_name": {
+    "xpath": "//*[@id=\"firstNameInput\"]",
+    "timestamp": 1770429077.3819351,
+    "metadata": {
+      "step": "name"
+    }
+  },
+  "name_last_name": {
+    "xpath": "//*[@id=\"lastNameInput\"]",
+    "timestamp": 1770429077.410332,
+    "metadata": {
+      "step": "name"
+    }
+  },
+  "name_next": {
+    "xpath": "//*[@id=\"view\"]/div/div[5]/button",
+    "timestamp": 1770429077.426102,
+    "metadata": {
+      "step": "name"
+    }
+  },
+  "email_input": {
+    "xpath": "//*[@id=\"floatingLabelInput4\"]",
+    "timestamp": 1771024857.153926,
+    "metadata": {
+      "step": "detect"
+    }
+  },
+  "password_input": {
+    "xpath": "//*[@id=\"floatingLabelInput13\"]",
+    "timestamp": 1771024882.446856,
+    "metadata": {
+      "step": "detect"
+    }
+  },
+  "captcha_frame": {
+    "xpath": "//*[@id=\"view\"]/div/div[3]/iframe",
+    "timestamp": 1770478006.9457972,
+    "metadata": {
+      "step": "detect"
+    }
+  },
+  "captcha_button": {
+    "xpath": "//*[@id=\"view\"]/div/div[3]/div[2]/span/span",
+    "timestamp": 1770478006.9659252,
+    "metadata": {
+      "step": "detect"
+    }
+  }
+}
