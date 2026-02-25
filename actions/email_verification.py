@@ -134,9 +134,8 @@ def handle_email_verification(browser_context, amazon_page, device, email: str, 
                     if resend.is_visible(timeout=2000):
                         logger.info("🔄 Clicking 'Resend code'...")
                         device.tap(resend, "Resend Code")
-                        device.tap(resend, "Resend Code")
-                        logger.info("⏳ Waiting 30s for new code generation...")
-                        time.sleep(30) # Increased from 5s to 30s to ensure old email isn't picked up
+                        logger.info("⏳ Waiting 10s for new code generation...")
+                        time.sleep(10) # Increased from 5s to 10s to ensure old email isn't picked up
                         used_otps.add(otp_code) # Ensure we don't try this again
                 except:
                     pass

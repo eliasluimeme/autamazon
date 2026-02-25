@@ -380,7 +380,8 @@ def handle_post_2fa_verification(page, identity: Identity):
     logger.info("🔍 Checking for post-2FA verification steps...")
     
     start_time = time.time()
-    while time.time() - start_time < 60: # Check for 60 seconds
+    seen_emails = set()
+    while time.time() - start_time < 60: # Check for 60 seconds to allow email arrival
         url = page.url
         found_action = False
         
@@ -438,40 +439,81 @@ def handle_post_2fa_verification(page, identity: Identity):
                     time.sleep(1)  # Brief stabilization
                     
                     # 2. Find the FIRST (latest) Amazon email
-                    # Email items are <article data-testid="MailListItem"> elements
                     target_email = None
+                    seen_key = None
                     
-                    # Primary: use exact Outlook DOM structure
-                    email_items = outlook_page.locator("article[data-testid='MailListItem']").all()
-                    if not email_items:
-                        # Fallback selectors
-                        email_items = outlook_page.locator("div[role='group'] article, div[role='option']").all()
-                    
-                    logger.info(f"Found {len(email_items)} email items in inbox")
-                    
-                    # Check the first few items (newest first) for Amazon email
-                    for item in email_items[:5]:
-                        try:
-                            text = item.text_content().lower()
-                            if "amazon" in text and ("access" in text or "account" in text or "verification" in text or "verify" in text):
-                                target_email = item
-                                preview = text[:100].replace('\n', ' ')
-                                logger.info(f"📨 Found Amazon email (first match): {preview}...")
+                    # 1st Priority: Exact match using aria-label (more robust)
+                    # We look specifically for "Account data access attempt" first
+                    try:
+                        aria_selectors = [
+                            "[aria-label*='amazon.com'][aria-label*='Account data access attempt']",
+                            "[aria-label*='amazon.com'][aria-label*='Account data access']",
+                        ]
+                        for sel in aria_selectors:
+                            elements = outlook_page.locator(sel).all()
+                            for el in elements:
+                                aria_val = el.get_attribute("aria-label") or ""
+                                # Clean up the value to check for fresh indicators if possible
+                                # Outlook labels often include "just now" or "X minutes ago"
+                                lower_aria = aria_val.lower()
+                                if "amazon" in lower_aria and aria_val not in seen_emails:
+                                    # Very basic check for freshness: avoid emails that mention "yesterday" or days of week if possible
+                                    # although this is brittle across locales
+                                    target_email = el
+                                    seen_key = aria_val
+                                    logger.info(f"📨 Found primary Amazon email via aria-label: {sel}")
+                                    break
+                            if target_email:
                                 break
-                        except:
-                            continue
-                    
-                    # Fallback: try aria-label based search
+                    except Exception as e:
+                        logger.debug(f"Aria priority check: {e}")
+
                     if not target_email:
-                        try:
-                            aria_el = outlook_page.locator("[aria-label*='amazon.com'][aria-label*='Account data access']").first
-                            if aria_el.is_visible(timeout=2000):
-                                target_email = aria_el
-                                logger.info("📨 Found Amazon email via aria-label")
-                        except:
-                            pass
-                    
+                        # 2nd Priority: Look for general email items and check their text
+                        email_items = outlook_page.locator("article[data-testid='MailListItem']").all()
+                        if not email_items:
+                            email_items = outlook_page.locator("div[role='group'] article, div[role='option']").all()
+                        
+                        logger.info(f"Found {len(email_items)} emails, searching for 'Account data access attempt'...")
+                        
+                        # Search for the TARGET email specifically first
+                        for item in email_items[:10]:
+                            try:
+                                text = item.text_content().lower()
+                                if "amazon.com" in text and "account data access attempt" in text:
+                                    preview = text[:150].replace('\n', ' ')
+                                    if preview not in seen_emails:
+                                        target_email = item
+                                        seen_key = preview
+                                        logger.info(f"📨 Found target Amazon email in text: {preview[:100]}...")
+                                        break
+                            except:
+                                continue
+
+                        # 3rd Priority: ONLY IF we've been waiting for a while, consider fallback amazon emails
+                        # This prevents us from grabbing a stale "Developer Account" email while the real one is still being delivered
+                        if not target_email and (time.time() - start_time > 20):
+                            logger.info("Target email not found after 20s, checking for fallback Amazon emails...")
+                            for item in email_items[:5]:
+                                try:
+                                    text = item.text_content().lower()
+                                    if "amazon" in text and ("verification" in text or "verify" in text or "otp" in text or "code" in text):
+                                        # Avoid the "atamazon appstore team" specifically if it's clearly not what we want
+                                        if "appstore" in text and "developer" in text:
+                                            continue
+                                            
+                                        preview = text[:150].replace('\n', ' ')
+                                        if preview not in seen_emails:
+                                            target_email = item
+                                            seen_key = preview
+                                            logger.info(f"📨 Found fallback Amazon email: {preview[:100]}...")
+                                            break
+                                except:
+                                    continue
+
                     if target_email:
+                        if seen_key:
+                            seen_emails.add(seen_key)
                         logger.info("✓ Found Amazon email in list, clicking...")
                         
                         # Record current URL to detect navigation
@@ -646,6 +688,7 @@ def handle_post_2fa_verification(page, identity: Identity):
                     continue 
                 else:
                     logger.error("❌ Could not retrieve code from Outlook")
+                    time.sleep(5) # Wait before retry loop to not spam Outlook
             except Exception as e:
                 logger.error(f"Error handling email verification: {e}")
 

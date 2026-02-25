@@ -225,7 +225,8 @@ def clear_cache(key: str = None):
 AMAZON_QUERIES = {
     "intent_page": """
     {
-        proceed_button(button to proceed to create an account)
+        proceed_button(the primary yellow button to proceed to create a new account)
+        create_account_link(any link or button to create a new account)
     }
     """,
     "signin_page": """

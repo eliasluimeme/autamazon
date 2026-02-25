@@ -56,8 +56,8 @@
     "timestamp": 1770324007.671215
   },
   "buy_now_1_click": {
-    "xpath": "//*[@id=\"limber-oneclick-button\"]",
-    "timestamp": 1771112869.2767591
+    "xpath": "//*[@id=\"one-click-button\"]",
+    "timestamp": 1771900895.961568
   },
   "otp_verify_button": {
     "xpath": "//*[@id=\"cvf-submit-otp-button\"]/span/input",

@@ -25,76 +25,212 @@ def handle_new_customer_intent(page, device: DeviceAdapter = None) -> bool:
         device = DeviceAdapter(page)
         
     logger.info("Handling 'New to Amazon' intent page...")
-    
     initial_url = page.url
-
-    # 1. Try cache or AgentQL via query_amazon
-    from amazon.agentql_helper import query_amazon
-    try:
-        results = query_amazon(page, "intent_page", cache=True)
-        
-        if 'proceed_button' in results and results['proceed_button']['element']:
-            btn = results['proceed_button']['element']
-            logger.info("Found intent button via AgentQL")
-            device.scroll_to_element(btn, "Proceed Button")
-            
-            # Try JS click first
-            device.js_click(btn, "Proceed Button (AgentQL)")
-            time.sleep(2)
-            
-            if page.url != initial_url:
-                logger.success("✅ 'Proceed' click triggered navigation (AgentQL)")
-                return True
-                
-            # Retry with force click
-            logger.warning("JS click didn't navigate, retrying with force click...")
-            btn.click(force=True)
-            time.sleep(2)
-            
-            if page.url != initial_url:
-                return True
-                
-            return True # Assume success if no error
-            
-    except Exception as e:
-        logger.debug(f"AgentQL intent button failed: {e}")
-
-    # 2. Fallback: Try direct selectors
-    intent_selectors = [
-        "button:has-text('Proceed to create an account')",
-        "span:has-text('Proceed to create an account')",
-        "#createAccountSubmit",
-        "input[type='submit'][value*='create']",
-        "a:has-text('Proceed to create an account')",
-    ]
     
-    for selector in intent_selectors:
+    proceed_btn = None
+    
+    # Priority 0: Cached XPaths
+    from amazon.utils.xpath_cache import get_cached_xpath, extract_and_cache_xpath
+    logger.debug("Checking for cached XPaths...")
+    try:
+        cached_xpath = get_cached_xpath("intent_proceed_btn")
+        if cached_xpath:
+            loc = page.locator(f"xpath={cached_xpath}").first
+            if loc.is_visible(timeout=500):
+                proceed_btn = loc
+                logger.info("✅ Found proceed button via cached XPath")
+    except Exception as e:
+        logger.debug(f"XPath cache error: {e}")
+
+    # Priority 1: Fallback direct selectors
+    if proceed_btn is None:
+        intent_selectors = [
+            "#createAccountSubmit",
+            "a:has-text('Proceed to create an account')",
+            "button:has-text('Proceed to create an account')",
+            "span:has-text('Proceed to create an account')",
+            "text='Proceed to create an account'",
+            "input[type='submit'][value*='create']",
+        ]
+        
+        for selector in intent_selectors:
+            try:
+                loc = page.locator(selector).first
+                if loc.is_visible(timeout=1000):
+                    proceed_btn = loc
+                    logger.info(f"Walking fallback selector: {selector}")
+                    try:
+                        extract_and_cache_xpath(page, proceed_btn, "intent_proceed_btn")
+                    except:
+                        pass
+                    break
+            except:
+                continue
+
+    # Priority 2: Try cache or AgentQL via query_amazon
+    if proceed_btn is None:
+        from amazon.agentql_helper import query_amazon
+        logger.info("🔄 CSS failed, trying AgentQL for intent page...")
         try:
-            btn = page.locator(selector).first
-            if btn.is_visible(timeout=1000):
-                logger.info(f"Walking fallback selector: {selector}")
-                device.scroll_to_element(btn, "Proceed Button")
-                
-                # Try JS click
-                device.js_click(btn, f"Proceed Button ({selector})")
-                time.sleep(2)
-                
-                if page.url != initial_url:
-                     logger.success(f"✅ 'Proceed' click triggered navigation ({selector})")
-                     return True
-                
-                # Retry with force click
-                logger.warning(f"JS click ({selector}) didn't navigate, retrying force click...")
-                btn.click(force=True)
-                time.sleep(2)
-                
-                if page.url != initial_url:
-                    return True
-                    
-                return True
-        except:
-            continue
+            results = query_amazon(page, "intent_page", cache=True)
+            # Try both possible names from our refined query
+            for key in ['proceed_button', 'create_account_link']:
+                if results and results.get(key) and results[key].get('element'):
+                    loc = results[key]['element']
+                    if loc.is_visible(timeout=1000):
+                        proceed_btn = loc
+                        logger.info(f"✅ Found {key} via AgentQL")
+                        try:
+                            extract_and_cache_xpath(page, proceed_btn, "intent_proceed_btn")
+                        except:
+                            pass
+                        break
+        except Exception as e:
+            logger.debug(f"AgentQL intent button failed: {e}")
+
+    if proceed_btn is None:
+        logger.error("Could not find proceed button on intent page")
+        return False
+        
+    # Attempt Clicks
+    device.scroll_to_element(proceed_btn, "Proceed Button")
+    
+    def has_progressed():
+        curr_url = page.url
+        # Signal 1: URL moved away from intent
+        if "/ax/claim/intent" not in curr_url:
+            logger.debug(f"Progressed: URL changed to {curr_url}")
+            return True
             
+        # Check if the proceed button is still visible. If it is, we likely haven't progressed.
+        try:
+            if proceed_btn.is_visible(timeout=500):
+                # If it's still visible, we might still be on the same page
+                # BUT wait, maybe the next page also has a similar button? (Rare for this flow)
+                # Let's check for the registration form specifically.
+                if page.locator("input[name='customerName'], #ap_customer_name").first.is_visible(timeout=500):
+                    logger.debug("Progressed: Registration form visible alongside button")
+                    return True
+                
+                logger.debug("Stayed: Proceed button still visible and no registration form")
+                return False
+        except:
+            # If we can't check visibility because it's detached, that's a good sign
+            pass
+
+        # Signal 2: Standard registration fields appear
+        indicators = [
+            "input[name='customerName']",
+            "#ap_customer_name",
+            "#ap_password",
+            "#cvf-page-content",
+        ]
+        
+        for sel in indicators:
+            try:
+                if page.locator(sel).first.is_visible(timeout=300):
+                    logger.debug(f"Progressed: Indicator {sel} visible")
+                    return True
+            except:
+                pass
+
+        # Signal 3: DOM Detachment (only if URL also potentially changed or form appeared)
+        # But for now, let's be strict. If we are still on /ax/claim/intent and button is gone,
+        # it might be a blank page or a load. Let's wait a bit.
+        return False
+
+    logger.info("Attempting to submit intent (Enter -> Click -> JS)...")
+    
+    # Trace initial state
+    initial_url = page.url
+    
+    # 1. Press Enter (Most organic submit)
+    try:
+        proceed_btn.press("Enter", timeout=1500)
+        time.sleep(1.5)
+        if has_progressed():
+            logger.success("✅ Intent advanced via Enter key!")
+            return True
+    except:
+        pass
+
+    # 2. Standard Click
+    try:
+        proceed_btn.click(timeout=3000)
+        time.sleep(2)
+        if has_progressed():
+            logger.success("✅ Intent advanced via standard click!")
+            return True
+    except Exception as e:
+        logger.debug(f"Standard Proceed click failed: {e}")
+
+    # 3. Forced Click
+    try:
+        proceed_btn.click(force=True, timeout=1500)
+        time.sleep(2)
+        if has_progressed():
+            logger.success("✅ Intent advanced via forced click!")
+            return True
+    except:
+        pass
+
+    # 4. Reliable JS Fallback
+    logger.warning("Standard interactions failed, trying robust JS fallback...")
+    try:
+        result = page.evaluate("""
+            () => {
+                const getByText = (text) => {
+                    const elements = document.querySelectorAll('span, button, a, input');
+                    return Array.from(elements).find(el => 
+                        el.textContent.includes(text) || (el.value && el.value.includes(text))
+                    );
+                };
+
+                // Strategy A: Find by IDs or specific selectors
+                const targets = [
+                    '#createAccountSubmit',
+                    'input[type="submit"]',
+                    'button[type="submit"]',
+                    'a.a-button-text'
+                ];
+                
+                for (const sel of targets) {
+                    const el = document.querySelector(sel);
+                    if (el && el.offsetParent !== null) {
+                        el.click();
+                        const clickable = el.closest('a, button, input');
+                        if (clickable) clickable.click();
+                        return 'clicked_selector_' + sel;
+                    }
+                }
+
+                // Strategy B: Find by exact visible text
+                const textBtn = getByText('Proceed to create');
+                if (textBtn && textBtn.offsetParent !== null) {
+                    textBtn.click();
+                    const clickable = textBtn.closest('a, button, input');
+                    if (clickable) clickable.click();
+                    return 'clicked_text_match';
+                }
+
+                return 'nothing_found';
+            }
+        """)
+        logger.info(f"JS fallback result: {result}")
+        time.sleep(2)
+        if has_progressed():
+            logger.success("✅ Intent advanced via JS fallback!")
+            return True
+    except Exception as e:
+        logger.error(f"JS fallback execution failed: {e}")
+
+    # Final check after a short wait
+    time.sleep(1)
+    if has_progressed():
+        logger.success("✅ Intent advanced after grace period!")
+        return True
+
+    logger.error("❌ Failed to navigate past intent page. All click methods exhausted.")
     return False
 
 
@@ -157,7 +293,10 @@ def click_create_account(page, device: DeviceAdapter = None) -> bool:
                     # Sometimes finding the input is better than clicking label
                     associated_id = create_label.get_attribute("for")
                     if associated_id:
-                         page.locator(f"#{associated_id}").click()
+                         try:
+                             page.locator(f"#{associated_id}").click(timeout=3000)
+                         except:
+                             page.locator(f"#{associated_id}").click(force=True, timeout=2000)
                     else:
                          device.tap(create_label, "Create Account label")
                 except:
@@ -191,14 +330,21 @@ def click_create_account(page, device: DeviceAdapter = None) -> bool:
             device.scroll_to_element(element, "Create Account")
             time.sleep(random.uniform(0.3, 0.8))
             
+            initial_url = page.url
             # Try clicking
             try:
-                element.click()
-                time.sleep(random.uniform(*DELAYS["after_click"]))
-                return True
+                element.click(timeout=3000)
             except:
-                element.evaluate("el => el.click()")
+                try:
+                    element.click(force=True, timeout=2000)
+                except:
+                    element.evaluate("el => el.click()")
+            
+            time.sleep(random.uniform(*DELAYS["after_click"]))
+            if page.url != initial_url or page.locator("#ap_customer_name, input[name='customerName']").first.is_visible(timeout=500):
                 return True
+            else:
+                logger.debug("AgentQL click didn't trigger navigation")
             
     except Exception as e:
         logger.warning(f"Prioritized approach failed: {e}")
@@ -223,14 +369,29 @@ def click_create_account(page, device: DeviceAdapter = None) -> bool:
         for selector in selectors:
             try:
                 element = page.locator(selector).first
-                if element.is_visible():
+                if element.is_visible(timeout=500):
                     logger.info(f"Found element with selector: {selector}")
                     device.scroll_to_element(element, "Create Account")
                     time.sleep(random.uniform(0.3, 0.6))
-                    element.click()
+                    
+                    initial_url = page.url
+                    try:
+                        element.click(timeout=3000)
+                    except:
+                        logger.info(f"Standard click timed out for {selector}, trying forced/JS click...")
+                        try:
+                            element.click(force=True, timeout=2000)
+                        except:
+                            device.js_click(element, "Create Account")
+                            
                     time.sleep(random.uniform(*DELAYS["after_click"]))
-                    logger.success("✓ Create Account clicked via selector")
-                    return True
+                    
+                    # Verify if the click triggered an action
+                    if page.url != initial_url or page.locator("#ap_customer_name, input[name='customerName']").first.is_visible(timeout=500):
+                        logger.success("✓ Create Account clicked via selector and navigated")
+                        return True
+                    else:
+                        logger.debug(f"Click on {selector} didn't trigger navigation, continuing...")
             except:
                 continue
                 
@@ -240,6 +401,7 @@ def click_create_account(page, device: DeviceAdapter = None) -> bool:
     # Final fallback: JS click on any element containing "Create account"
     logger.info("Trying JS text-based click...")
     try:
+        initial_url = page.url
         result = page.evaluate("""
             () => {
                 // 1. Look for radio button and its label
@@ -256,20 +418,22 @@ def click_create_account(page, device: DeviceAdapter = None) -> bool:
                 }
 
                 // 2. Find any clickable element with "Create account" text
-                const elements = document.querySelectorAll('label, a, button, input, span, div');
+                const elements = document.querySelectorAll('a, button, label, input[type="button"], input[type="submit"], span, div');
                 for (const el of elements) {
-                    if (el.textContent && el.textContent.includes('Create account')) {
-                        // ... existing logic ...
-                        const forId = el.getAttribute('for');
-                        if (forId) {
-                            const input = document.getElementById(forId);
-                            if (input) {
-                                input.click();
-                                return 'clicked_input';
+                    if (el.textContent) {
+                        const text = el.textContent.trim();
+                        if (text === 'Create account' || text === 'Create your Amazon account' || text === 'Create a new Amazon account') {
+                            const forId = el.getAttribute('for');
+                            if (forId) {
+                                const input = document.getElementById(forId);
+                                if (input) {
+                                    input.click();
+                                    return 'clicked_input';
+                                }
                             }
+                            el.click();
+                            return 'clicked_element';
                         }
-                        el.click();
-                        return 'clicked_element';
                     }
                 }
                 return null;
@@ -278,8 +442,12 @@ def click_create_account(page, device: DeviceAdapter = None) -> bool:
         
         if result:
             logger.success(f"✓ Create Account clicked via JS: {result}")
-            time.sleep(1.5) # Wait for potential redirect
-            return True
+            time.sleep(2.0) # Wait for potential redirect
+            if page.url != initial_url or page.locator("#ap_customer_name, input[name='customerName']").first.is_visible(timeout=500):
+                return True
+            else:
+                logger.warning("JS click executed but state didn't change.")
+                return False
             
     except Exception as e:
         logger.warning(f"JS fallback failed: {e}")
@@ -543,7 +711,13 @@ def click_continue_registration(page, device: DeviceAdapter = None) -> bool:
         for key in ['continue_button', 'create_account_button']:
             if key in results and results[key].get('element'):
                 btn = results[key]['element']
-                btn.click()
+                try:
+                    btn.click(timeout=3000)
+                except:
+                    try:
+                        btn.click(force=True, timeout=2000)
+                    except:
+                        pass
                 time.sleep(1.5)
                 if page.url != initial_url:
                     return True
