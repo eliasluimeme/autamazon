@@ -307,7 +307,7 @@ def _check_and_handle_username_taken(page, identity: dict, device) -> bool:
     # Check for error message indicating username is taken
     try:
         page_content = page.content().lower()
-        has_error = "already taken" in page_content or "try another" in page_content
+        has_error = "already taken" in page_content or "try another" in page_content or "isn't available" in page_content
 
         if not has_error:
             # Also try error element

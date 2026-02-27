@@ -15,23 +15,32 @@ import re
 from loguru import logger
 
 from amazon.config import DELAYS
+from amazon.utils.imap_helper import get_otp_from_imap
+from amazon.core.interaction import InteractionEngine
 
 
-def handle_email_verification(browser_context, amazon_page, device, email: str, max_wait: int = 120) -> bool:
+def _safe_is_visible(locator, timeout=500):
+    """Safely check if an element is visible without throwing exceptions."""
+    try:
+        return locator.is_visible(timeout=timeout)
+    except:
+        return False
+
+
+def handle_email_verification(browser_context, amazon_page, device, email: str, max_wait: int = 120, purpose: str = "signup", used_otps: set = None) -> bool:
     """
     Handle the complete email verification flow.
     
     Args:
-        browser_context: Playwright browser context (to create new tabs)
+        browser_context: Playwright browser context
         amazon_page: The Amazon page waiting for OTP
         device: DeviceAdapter instance
-        email: Email address to check for verification code
+        email: Email address to check
         max_wait: Maximum seconds to wait for email
-        
-    Returns:
-        True if verification succeeded
+        purpose: "signup" or "reauth" - determines button labels and logic
+        used_otps: Optional set of already used OTP codes to skip
     """
-    logger.info("📧 Starting email verification flow...")
+    logger.info(f"📧 Starting email verification flow (Purpose: {purpose})...")
     
     # Step 0: Check for CAPTCHA first
     if _is_captcha_present(amazon_page):
@@ -50,6 +59,24 @@ def handle_email_verification(browser_context, amazon_page, device, email: str, 
             logger.error(f"Expected OTP page, got: {url}")
             return False
     
+    # Step 0.5: Try IMAP fast retrieval first
+    # We need the email password. Identity is not passed here, so we might need to find it.
+    # For now, we assume the identity manager or session state might provide it.
+    # If we don't have password, we skip to browser-based Outlook.
+    from amazon.identity_manager import find_identity_by_email
+    ident = find_identity_by_email(email)
+    
+    if ident and ident.password:
+        otp_code = get_otp_from_imap(ident.email, ident.password, timeout=60)
+        if otp_code:
+            logger.success(f"✅ OTP retrieved via IMAP: {otp_code}")
+            amazon_page.bring_to_front()
+            if _enter_otp_code(amazon_page, device, otp_code, purpose):
+                logger.success(f"✓ Email verification completed via IMAP! ({purpose})")
+                return True
+    
+    logger.info("IMAP retrieval failed or unavailable, falling back to browser-based Outlook...")
+    
     # Step 1: Open Outlook in a new tab
     outlook_page = None
     try:
@@ -65,7 +92,8 @@ def handle_email_verification(browser_context, amazon_page, device, email: str, 
     
     # Retry loop for OTP
     max_retries = 3
-    used_otps = set()
+    if used_otps is None:
+        used_otps = set()
     
     for attempt in range(max_retries):
         logger.info(f"🔄 OTP Attempt {attempt + 1}/{max_retries}")
@@ -78,25 +106,26 @@ def handle_email_verification(browser_context, amazon_page, device, email: str, 
         # Step 3: Get OTP
         otp_code = None
         try:
-            # Refresh outlook on retries
-            page_refreshed = False
-            if attempt > 0:
-                try:
-                    outlook_page.reload()
-                    _wait_for_outlook_ready(outlook_page)
-                    page_refreshed = True
-                except: pass
+            # ALWAYS go to inbox at start of wait to ensure we don't see old cached list or old email
+            try:
+                logger.info("📬 Re-navigating to Outlook inbox for fresh list...")
+                outlook_page.goto("https://outlook.live.com/mail/0/inbox", wait_until="domcontentloaded", timeout=30000)
+                _wait_for_outlook_ready(outlook_page)
+                time.sleep(3)
+            except: pass
             
             # loop to ensure we get a NEW code
             otp_wait_start = time.time()
+            page_refreshed = False
             while time.time() - otp_wait_start < (max_wait if attempt == 0 else 60):
                 otp_code = _wait_for_amazon_email(outlook_page, device, 10) # short poll
                 if otp_code and otp_code not in used_otps:
                     break
                 elif otp_code in used_otps:
-                    logger.info(f"Examples found ({otp_code}) but already used. Waiting for new one...")
+                    logger.info(f"Code {otp_code} was already used. Waiting for a fresh email...")
                     if not page_refreshed and (time.time() - otp_wait_start) > 15:
                          try:
+                            logger.info("🔄 Refreshing Outlook to look for new messages...")
                             outlook_page.reload()
                             _wait_for_outlook_ready(outlook_page)
                             page_refreshed = True
@@ -121,8 +150,8 @@ def handle_email_verification(browser_context, amazon_page, device, email: str, 
             amazon_page.bring_to_front()
             time.sleep(1)
             
-            if _enter_otp_code(amazon_page, device, otp_code):
-                logger.success("✓ Email verification completed!")
+            if _enter_otp_code(amazon_page, device, otp_code, purpose):
+                logger.success(f"✓ Email verification completed! ({purpose})")
                 if outlook_page: outlook_page.close()
                 return True
             else:
@@ -235,8 +264,10 @@ def _is_otp_page(page) -> bool:
             "text='Enter security code'",
             "text='Verify email address'",
             "text='Enter the code'",
+            "text='Enter verification code'",
             "input[name='code']",
             "#cvf-input-code",
+            "input[name='cvf_captcha_input']"
         ]
         
         for indicator in otp_indicators:
@@ -347,22 +378,28 @@ def _wait_for_amazon_email(page, device, max_wait: int) -> str | None:
 def _dismiss_outlook_prompts(page, device):
     """Dismiss common Outlook prompts and dialogs."""
     prompts = [
+        "text='Maybe later'",
+        "text='Not now'",
+        "text='No thanks'",
         "button:has-text('Maybe later')",
+        "span:has-text('Maybe later')",
         "button:has-text('Not now')",
         "button:has-text('No thanks')",
         "button:has-text('Skip')",
+        "button:has-text('Add to home')",
         "[aria-label='Close']",
+        "i[data-icon-name='Cancel']",
     ]
     
     for selector in prompts:
         try:
             btn = page.locator(selector).first
-            if btn.is_visible(timeout=300):
+            if _safe_is_visible(btn, timeout=100):
+                logger.debug(f"Dismissing Outlook prompt: {selector}")
                 device.tap(btn, "dismiss button")
-                time.sleep(0.5)
+                time.sleep(1)
         except:
             continue
-
 
 def _click_amazon_email(page, device) -> bool:
     """
@@ -371,51 +408,82 @@ def _click_amazon_email(page, device) -> bool:
     Returns:
         True if email was clicked
     """
-    # Selectors for Amazon email - based on user screenshots
+    # 0. User Requested & Semantic Selectors - High Priority
+    selectors = [
+        "article[data-testid='MailListItem']", # DevTools semantic - High Priority
+        "xpath=//*[@id='screen-stack-root']/div/div/main/div/div/div[2]", # User requested
+        "div[role='option']", # Standard Outlook
+    ]
+    
+    for selector in selectors:
+        try:
+            email_el = page.locator(selector).first
+            if _safe_is_visible(email_el, timeout=200):
+                # Verify it's actually Amazon before clicking
+                text = email_el.text_content().lower()
+                if "amazon" in text:
+                    logger.info(f"📨 Found Amazon email via '{selector}', using JS click fallback...")
+                    # Force scroll for mobile view reliability
+                    email_el.scroll_into_view_if_needed()
+                    time.sleep(0.5)
+                    
+                    # User Request: JS click fallback for reliability
+                    try:
+                        device.js_click(email_el, "Amazon email (JS)")
+                    except:
+                        device.tap(email_el, "Amazon email (Tap)")
+                    return True
+        except: continue
+
+    # 1. Look for VERY RECENT Amazon emails (e.g. 'now', '0 min', '1 min')
+    recent_selectors = [
+        "div:has-text('Account data access attempt'):has-text('now')",
+        "div:has-text('Account data access attempt'):has-text('min')",
+        "div:has-text('Verify your new Amazon account'):has-text('now')",
+    ]
+    
+    for selector in recent_selectors:
+        try:
+            email_el = page.locator(selector).first
+            if _safe_is_visible(email_el, timeout=200):
+                logger.info(f"✨ Found RECENT Amazon email: {selector}")
+                device.tap(email_el, "Recent Amazon email")
+                return True
+        except: continue
+
+    # 2. Fallback to top-most Amazon email regardless of specific timestamp text
     amazon_selectors = [
-        # By sender name
-        "div:has-text('Amazon'):has-text('Verify')",
-        "[aria-label*='Amazon'][aria-label*='Verify']",
-        # By subject line
+        # Specific 2FA / Security Subjects
+        "div:has-text('Account data access attempt')",
         "div:has-text('Verify your new Amazon account')",
-        "[aria-label*='Verify your new Amazon account']",
+        "div:has-text('Amazon password assistance')",
+        "div:has-text('Your Amazon security code')",
         # Generic Amazon
-        "div:has-text('Amazon.com')",
+        "div:has-text('amazon.com')",
+        "div:has-text('Amazon'):has-text('Verify')",
     ]
     
     for selector in amazon_selectors:
         try:
-            emails = page.locator(selector).all()
-            for email_el in emails[:3]:
-                try:
-                    if email_el.is_visible(timeout=300):
-                        # Check text contains Amazon
-                        text = email_el.text_content().lower()
-                        if "amazon" in text and ("verify" in text or "account" in text or "otp" in text):
-                            logger.info("📨 Found Amazon verification email, clicking...")
-                            device.tap(email_el, "Amazon email")
-                            return True
-                except:
-                    continue
+            # We use first() to get the top-most (newest) in Outlook's list
+            email_el = page.locator(selector).first
+            if _safe_is_visible(email_el, timeout=200):
+                logger.info(f"📨 Found top-most Amazon email via '{selector}'")
+                device.tap(email_el, "Amazon email")
+                return True
         except:
             continue
     
-    # Alternative: Find by checking all email items
+    # 3. Last resort: top item that mentions Amazon
     try:
-        # Outlook email item selectors
-        email_items = page.locator("div[role='option'], div[data-convid], [role='listitem']").all()
-        
-        for item in email_items[:10]:  # Check first 10 emails
-            try:
-                text = item.text_content().lower()
-                if "amazon" in text and ("verify" in text or "account" in text):
-                    logger.info("📨 Found Amazon email in list")
-                    device.tap(item, "Amazon email item")
-                    return True
-            except:
-                continue
-    except:
-        pass
+        items = page.locator("div[role='option'], div[data-convid], [role='listitem']").all()
+        for item in items[:3]: 
+            text = item.text_content().lower()
+            if "amazon" in text:
+                logger.info("📨 Found Amazon-related item in top 3")
+                device.tap(item, "Amazon email item")
+                return True
+    except: pass
     
     return False
 
@@ -513,17 +581,9 @@ def _is_valid_otp(code: str) -> bool:
     return True
 
 
-def _enter_otp_code(page, device, otp_code: str) -> bool:
+def _enter_otp_code(page, device, otp_code: str, purpose: str = "signup") -> bool:
     """
     Enter the OTP code on Amazon verification page.
-    
-    Args:
-        page: Amazon verification page
-        device: DeviceAdapter instance
-        otp_code: 6-digit OTP code
-        
-    Returns:
-        True if successfully entered and verified
     """
     # Find OTP input field - updated selectors based on screenshot
     otp_selectors = [
@@ -584,113 +644,84 @@ def _enter_otp_code(page, device, otp_code: str) -> bool:
         logger.error("Could not find OTP input field")
         return False
     
-    return _click_verify_button(page, device)
+    return _click_verify_button(page, device, purpose)
 
-def _click_verify_button(page, device) -> bool:
-    """Helper to click the verify button with caching and AgentQL verification."""
-    from amazon.utils.xpath_cache import get_cached_xpath, extract_and_cache_xpath
-    import agentql
+def _click_verify_button(page, device, purpose: str = "signup") -> bool:
+    """Helper to click the verify button with robust transition check."""
+    interaction = InteractionEngine(page, device)
+    initial_url = page.url
     
-    initial_url = page.url.lower()
+    # Purpose-based configuration
+    if purpose == "reauth":
+        description = "Submit Code Button"
+        query = "{ submit_code_button(the primary button to verify the security code) }"
+    else:
+        description = "Create Amazon Account Button"
+        query = "{ create_amazon_account_button(the primary button to submit the OTP and create the account) }"
     
-    # Define query to check result state (Success vs Error)
-    VERIFY_RESULT_QUERY = """
-    {
-        phone_number_input(input field for phone number, indicating success)
-        otp_error_message(text saying 'invalid code', 'wrong code', 'incorrect code')
-        verify_button(the verify button itself, indicating we are still on the same page)
-    }
-    """
-
-    def _check_result_state():
-        """Check if we succeeded or failed using AgentQL."""
-        try:
-            logger.info("🕵️ Using AgentQL to verify OTP submission result...")
-            aq_page = agentql.wrap(page)
-            response = aq_page.query_elements(VERIFY_RESULT_QUERY)
-            
-            if response.phone_number_input:
-                logger.success("✅ AgentQL detected Phone Number input - OTP Accepted!")
-                return True, True  # (Finished, Success)
-            
-            if response.otp_error_message:
-                error_text = response.otp_error_message.text_content()
-                logger.error(f"❌ AgentQL detected OTP error: {error_text}")
-                return True, False # (Finished, Failed)
-                
-            if not response.verify_button:
-                 # If verify button is gone and no error, likely moved on
-                 logger.success("✅ AgentQL: Verify button gone, assuming success")
-                 return True, True
-                 
-            return False, False # (Not Finished, still on page)
-        except Exception as e:
-            logger.error(f"AgentQL check failed: {e}")
-            # Fallback to URL check
-            if page.url.lower() != initial_url:
-                return True, True
-            return False, False
-
-    # 1. Click logic (try cached, then standard, then AgentQL query)
-    clicked = False
-    
-    # Try Cached XPath
-    cached_xpath = get_cached_xpath("otp_verify_button")
-    if cached_xpath:
-        try:
-            btn = page.locator(f"xpath={cached_xpath}").first
-            if btn.is_visible(timeout=2000):
-                logger.info(f"Using cached XPath for Verify: {cached_xpath}")
-                device.js_click(btn, "Verify Button (Cached)")
-                clicked = True
-        except: pass
-
-    # Try Standard Selectors if not clicked
-    if not clicked:
-        verify_selectors = [
-            "#cvf-submit-otp-button", 
-            "input[aria-labelledby='cvf-submit-otp-button-announce']",
+    # Use biomechanical=True for the final submission button
+    success = interaction.smart_click(
+        description=description,
+        selectors=[
+            "xpath=//*[@id='cvf-submit-otp-button']/span/input", 
+            "xpath=//*[@id='cvf-submit-otp-button-announce']", 
+            "#cvf-submit-otp-button-announce",
+            "button:has-text('Submit code')",
+            "input[aria-label='Verify OTP Button']",
             "button:has-text('Create your Amazon account')",
+            "span:has-text('Create your Amazon account')",
+            "#cvf-submit-otp-button", 
+            "input[name='cvf_submit_otp_button']",
+            "button:has-text('Verify')",
+            "input[type='submit'][value='Verify']",
+            "span.a-button-inner:has-text('Verify')",
             "input[type='submit']"
-        ]
-        for selector in verify_selectors:
-            try:
-                btn = page.locator(selector).first
-                if btn.is_visible(timeout=1000):
-                    logger.info(f"Clicking standard selector: {selector}")
-                    device.js_click(btn, "Verify Button")
-                    clicked = True
-                    break
-            except: continue
-            
-    # Try AgentQL Click if still not clicked
-    if not clicked:
-        try:
-            logger.info("Using AgentQL to find Verify button...")
-            aq_page = agentql.wrap(page)
-            response = aq_page.query_elements("{ verify_button(The 'Create your Amazon account' or 'Verify' button) }")
-            if response.verify_button:
-                device.js_click(response.verify_button, "Verify Button (AgentQL)")
-                clicked = True
-        except: pass
-
-    if not clicked:
-        logger.error("Could not find Verify button to click")
+        ],
+        agentql_query=query,
+        cache_key="cvf_verify_button",
+        biomechanical=True 
+    )
+    
+    if not success:
+        logger.error("❌ Could not click Verify button via any method.")
         return False
         
-    # 2. Wait and Verify Result
-    logger.info("⏳ Waiting for OTP submission result...")
-    time.sleep(3)
+    # Wait and verify REAL progression (don't be optimistic)
+    logger.info("⏳ Monitoring for page transition after Verify click...")
     
-    # retry check a few times
-    for _ in range(3):
-        finished, success = _check_result_state()
-        if finished:
-            return success
-        time.sleep(2)
+    # Check for up to 10 seconds with high resolution (0.5s chunks)
+    for _ in range(20):
+        current_url = page.url.lower()
         
-    # Final check - if we're still here, try to force click one last time?
-    # Or just return False
-    logger.warning("⚠️ Could not verify OTP result definitively, assuming false positive or stuck.")
-    return False
+        # 1. Success indicator: URL changed away from CVF
+        if "/ap/cvf" not in current_url and "verification" not in current_url:
+            logger.success("✅ Page transitioned - Success!")
+            return True
+            
+        # 2. Check for errors visible on page
+        error_selectors = [
+            ".a-alert-error",
+            "#cvf-error-message",
+            "text='invalid code'",
+            "text='wrong code'",
+            "text='incorrect code'",
+            "text='Please enter the OTP'"
+        ]
+        for sel in error_selectors:
+            try:
+                if page.locator(sel).first.is_visible(timeout=50):
+                    error_text = page.locator(sel).first.text_content().strip()
+                    logger.error(f"❌ OTP submission failed error: {error_text}")
+                    return False
+            except: continue
+        
+        time.sleep(0.5)
+            
+    # If we are still here, it probably didn't work
+    if page.url == initial_url:
+        logger.warning("⚠️ Still on CVF page after 10s. Click might have failed silently.")
+        return False
+        
+    return True
+
 

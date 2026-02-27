@@ -115,8 +115,13 @@ def interpolate_points_arc(p1, p2, steps, curve_magnitude=50, easing_func=pt.eas
 def human_like_mobile_tap(page, locator):
     cdp = None
     try:
+        # 0. Safety Check
+        if page.is_closed():
+            logger.error("Page closed before tap.")
+            return False
+
         locator.scroll_into_view_if_needed() # Ensure element is in viewport (User Check #2)
-        locator.wait_for(state="visible", timeout=10000)
+        locator.wait_for(state="visible", timeout=5000)
         box = locator.bounding_box()
         if not box: return False
 
@@ -173,6 +178,11 @@ def human_like_mobile_tap(page, locator):
 def human_like_mobile_scroll(page, direction="down", magnitude="medium"):
     cdp = None
     try:
+        # 0. Safety Check
+        if page.is_closed():
+            logger.error("Page closed before scroll.")
+            return
+
         # Viewport Logic
         vp = page.viewport_size
         if not vp:

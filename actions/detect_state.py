@@ -130,10 +130,21 @@ def detect_signup_state(page, agentql_page=None) -> str:
         - 'add_mobile'
         - 'unknown'
     """
+    if page.is_closed():
+        logger.error("Page is closed. Cannot detect state.")
+        return "unknown"
+        
+    # ============================================================
+    # 🔑 Priority 0: Network/Browser Error Check (Fast & Essential)
+    # ============================================================
+    if _is_network_error(page):
+        logger.error("🛑 Browser network error detected (Amazon unreachable).")
+        return "error"
+        
     url = page.url.lower()
     
     # ============================================================
-    # 🔑 Priority 0: Try Cached Detectors (Fastest)
+    # 🔑 Priority 0.5: Try Cached Detectors (Fastest)
     # ============================================================
     state = _detect_via_cache(page)
     if state:
@@ -539,3 +550,42 @@ def _detect_via_agentql(page, agentql_page) -> str | None:
         logger.debug(f"State detection via AgentQL failed: {e}")
         
     return None
+
+
+def _is_network_error(page) -> bool:
+    """Detect if we are on a browser error page."""
+    try:
+        # Check for specific network error codes in title or body
+        title = page.title().lower()
+        if "site can't be reached" in title or "error" in title or "amazon.com.au" in title:
+             if "amazon.com" not in title and len(page.content()) < 1000:
+                # Likely an error page with just URL in title
+                return True
+        
+        # Check for common error page elements (Chromium)
+        error_indicators = [
+            "#main-frame-error",
+            "#diagnose-button",
+            "text=ERR_TUNNEL_CONNECTION_FAILED",
+            "text=ERR_CONNECTION_REFUSED",
+            "text=ERR_NAME_NOT_RESOLVED",
+            "text=ERR_CONNECTION_TIMED_OUT"
+        ]
+        for sel in error_indicators:
+            try:
+                if page.locator(sel).first.is_visible(timeout=200):
+                    return True
+            except: pass
+        
+        # Check for empty/blank page content
+        content = page.content()
+        if len(content) < 300 and "<html><head></head><body>" in content.lower():
+            return True
+            
+    except Exception as e:
+        err_msg = str(e).lower()
+        # SecurityError: Failed to read 'localStorage' often means we are on a browser-internal/error page
+        if "access is denied" in err_msg or "securityerror" in err_msg:
+            return True
+        pass
+    return False

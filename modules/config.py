@@ -28,16 +28,18 @@ TARGET_URL = os.getenv("TARGET_URL", "https://06bdmbet07.com")
 WARMUP_DURATION = int(os.getenv("WARMUP_DURATION", "3"))
 
 # Logging Setup
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-
-logger.remove()
-
-logger.add(
-    sys.stdout,
-    level=LOG_LEVEL,
-    format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{module}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
-)
-
-# Ensure logs directory exists at project root or relative
-os.makedirs("logs", exist_ok=True)
-logger.add(f"logs/{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log", level=LOG_LEVEL, rotation="10 MB")
+# Skip if orchestrator already configured logging (prevents handler conflicts)
+if not os.getenv("ORCHESTRATOR_LOGGING"):
+    LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+    
+    logger.remove()
+    
+    logger.add(
+        sys.stdout,
+        level=LOG_LEVEL,
+        format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{module}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
+    )
+    
+    # Ensure logs directory exists at project root or relative
+    os.makedirs("logs", exist_ok=True)
+    logger.add(f"logs/{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log", level=LOG_LEVEL, rotation="10 MB")

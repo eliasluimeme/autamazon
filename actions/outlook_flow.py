@@ -1,41 +1,45 @@
 """
 Outlook Setup Flow Encapsulation
 """
+import time
 from loguru import logger
 from amazon.identity_manager import Identity
 
 def handle_outlook_setup(manager, page, device):
     """
     Handles the Outlook signup process and transitions to Amazon.
-    
-    Args:
-        manager: OpSecBrowserManager instance
-        page: Current playwright page
-        device: DeviceAdapter instance
-        
-    Returns:
-        tuple: (identity, new_page) if successful, (None, None) if failed
     """
     logger.info("📧 Starting Outlook Signup Step...")
+    
+    # User Request: Use a new tab and close the old one
+    try:
+        logger.info("🆕 Switching to fresh tab for Outlook...")
+        new_outlook_page = manager.context.new_page()
+        if page and not page.is_closed():
+            page.close()
+        page = new_outlook_page
+        device.page = page
+    except Exception as e:
+        logger.warning(f"Could not recycle tab for Outlook: {e}")
     
     max_attempts = 3
     for attempt in range(max_attempts):
         logger.info(f"📧 Outlook Signup Attempt {attempt + 1}/{max_attempts}")
         
         try:
+            if page.is_closed():
+                page = manager.context.new_page()
+                device.page = page
+
             from amazon.outlook.run import run_outlook_signup
             outlook_data = run_outlook_signup(page, device)
             
             if outlook_data == "RETRY":
                 logger.warning(f"🔄 Outlook signaled retry (Attempt {attempt + 1})")
                 if attempt < max_attempts - 1:
-                    # Clean up/Restart page
-                    page.goto("about:blank")
                     time.sleep(2)
-                    page.goto("https://signup.live.com/signup?lic=1")
                     continue
                 else:
-                    logger.error("❌ Max Outlook retries reached")
                     return None, None
             
             if outlook_data and isinstance(outlook_data, dict):
@@ -49,19 +53,23 @@ def handle_outlook_setup(manager, page, device):
                     password=outlook_data['password']
                 )
                 
-                # Open new tab for Amazon
-                logger.info("Opening new tab for Amazon...")
-                new_page = manager.context.new_page()
+                # Open new tab for Amazon and close Outlook tab
+                logger.info("🚀 Transitioning to Amazon in a fresh tab...")
+                final_page = manager.context.new_page()
+                page.close()
                 
-                return generated_identity, new_page
+                return generated_identity, final_page
                 
             else:
                 logger.error("Outlook signup failed (no data returned)")
+                if attempt < max_attempts - 1:
+                    continue
                 return None, None
                 
         except Exception as e:
             logger.error(f"Outlook step failed on attempt {attempt + 1}: {e}")
             if attempt < max_attempts - 1:
+                time.sleep(2)
                 continue
             return None, None
             

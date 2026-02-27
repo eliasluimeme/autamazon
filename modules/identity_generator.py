@@ -22,12 +22,21 @@ class IdentityGenerator:
         else:
             self.db_path = str(DB_PATH)
             
-        self._fakers = {
-            "DE": Faker("de_DE"), "IT": Faker("it_IT"), "ES": Faker("es_ES"),
-            "NL": Faker("nl_NL"), "RO": Faker("ro_RO"), "PL": Faker("pl_PL"),
-            "BE": Faker("nl_BE"), "UA": Faker("uk_UA"), "AU": Faker("en_AU"),
-            "CA": Faker("en_CA"), "US": Faker("en_US")
+        self._fakers = {}
+
+    def _get_faker(self, country_code):
+        country_code = country_code.upper() if country_code else "US"
+        locales = {
+            "DE": "de_DE", "IT": "it_IT", "ES": "es_ES",
+            "NL": "nl_NL", "RO": "ro_RO", "PL": "pl_PL",
+            "BE": "nl_BE", "UA": "uk_UA", "AU": "en_AU",
+            "CA": "en_CA", "US": "en_US"
         }
+        locale = locales.get(country_code, "en_US")
+        
+        if locale not in self._fakers:
+            self._fakers[locale] = Faker(locale)
+        return self._fakers[locale]
 
     def _get_date_format(self, country_code):
         if country_code in ["US", "CA"]: return "%m/%d/%Y"
@@ -61,7 +70,7 @@ class IdentityGenerator:
     def generate_identity(self, country_code: str, region_name: str = None):
         # Ensure country_code is safe string
         country_code = str(country_code).upper() if country_code else "US"
-        fake = self._fakers.get(country_code, Faker("en_US"))
+        fake = self._get_faker(country_code)
         
         try:
             with sqlite3.connect(self.db_path) as conn:
@@ -93,15 +102,17 @@ class IdentityGenerator:
                 
                 if resolved_region:
                     col_to_match = "admin_code1" if len(resolved_region) <= 3 and country_code in ["US", "CA", "AU"] else "admin_name1"
-                    query = f"SELECT place_name, postal_code, admin_name1 FROM locations WHERE country_code=? AND {col_to_match}=? ORDER BY RANDOM() LIMIT 1"
+                    query = f"SELECT place_name, postal_code, admin_name1 FROM locations WHERE country_code=? AND {col_to_match}=?"
                     cursor.execute(query, (country_code, resolved_region))
-                    loc_row = cursor.fetchone()
+                    rows = cursor.fetchall()
+                    if rows: loc_row = random.choice(rows)
 
                 if not loc_row:
                     if region_name: logger.warning(f"Region '{region_name}' empty/unknown in DB. Using National Random.")
-                    query = "SELECT place_name, postal_code, admin_name1 FROM locations WHERE country_code=? ORDER BY RANDOM() LIMIT 1"
+                    query = "SELECT place_name, postal_code, admin_name1 FROM locations WHERE country_code=?"
                     cursor.execute(query, (country_code,))
-                    loc_row = cursor.fetchone()
+                    rows = cursor.fetchall()
+                    if rows: loc_row = random.choice(rows)
                 
                 if loc_row:
                     city, zipcode, state = loc_row
@@ -112,9 +123,9 @@ class IdentityGenerator:
                     city, zipcode, state = fake.city(), fake.postcode(), (region_name or "Unknown")
 
                 # --- 3. ADDRESS ---
-                cursor.execute("SELECT street_name FROM streets WHERE country_code = ? ORDER BY RANDOM() LIMIT 1", (country_code,))
-                street_row = cursor.fetchone()
-                street_base = street_row[0] if street_row else fake.street_name()
+                cursor.execute("SELECT street_name FROM streets WHERE country_code = ?", (country_code,))
+                rows = cursor.fetchall()
+                street_base = random.choice(rows)[0] if rows else fake.street_name()
                 street_num = random.randint(1, 150)
                 
                 if country_code in ["US", "CA", "GB", "AU"]:

@@ -61,11 +61,12 @@ def handle_passkey_nudge(page, device: DeviceAdapter = None) -> bool:
     logger.info("🛡️ Passkey nudge detected, skipping...")
     
     # 1. Clear potential system popups (Touch ID / Fingerprint)
-    # The user suggested clicking Esc 3 times
-    logger.info("Sending Escape x3 to clear system popups...")
+    logger.info("⌨️ Pressing ESC x3 to dismiss dialogs...")
+    page.bring_to_front()
     for _ in range(3):
         page.keyboard.press("Escape")
         time.sleep(0.5)
+    time.sleep(0.5)
         
     # 2. Click "Skip" button
     skip_selectors = [
@@ -97,16 +98,20 @@ def handle_passkey_nudge(page, device: DeviceAdapter = None) -> bool:
             continue
             
     if not clicked:
-        # Try JS fallback for Skip
         try:
             result = page.evaluate("""
                 () => {
-                    const elements = document.querySelectorAll('a, button, span, div');
-                    for (const el of elements) {
-                        if (el.textContent && el.textContent.trim() === 'Skip') {
-                            el.click();
-                            return 'clicked_text';
-                        }
+                    const elements = Array.from(document.querySelectorAll('a, button, span, div'));
+                    const skipBtn = elements.find(el => {
+                        if (!el.textContent) return false;
+                        const t = el.textContent.toLowerCase().trim();
+                        return t === 'skip' || t === 'not now' || t.includes('no, keep using') || t === 'skip setup';
+                    });
+                    if (skipBtn) {
+                        skipBtn.click();
+                        ['mousedown', 'click', 'mouseup'].forEach(n => skipBtn.dispatchEvent(new MouseEvent(n, {bubbles:true})));
+                        if (skipBtn.href) { window.location.href = skipBtn.href; }
+                        return 'clicked_text';
                     }
                     return null;
                 }

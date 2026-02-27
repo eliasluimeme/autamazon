@@ -46,27 +46,52 @@ class OpSecBrowserManager:
         """
         logger.info(f"🚀 Launching browser for profile {self.profile_id}...")
         
-        # Start AdsPower profile using V1 API
-        try:
-            headless_flag = "1" if headless else "0"
-            url = f"{self.api_url}/api/v1/browser/start?user_id={self.profile_id}&headless={headless_flag}&open_tabs=1"
-            resp = requests.get(url, timeout=30)
-            data = resp.json()
-            
-            if data["code"] != 0:
-                logger.error(f"Failed to start profile: {data.get('msg')}")
-                return None
+        # Start AdsPower profile using V1 API with retry logic for "Too many requests"
+        max_attempts = 5
+        data = None
+        
+        for attempt in range(max_attempts):
+            try:
+                headless_flag = "1" if headless else "0"
+                url = f"{self.api_url}/api/v1/browser/start?user_id={self.profile_id}&headless={headless_flag}&open_tabs=1"
+                resp = requests.get(url, timeout=30)
+                data = resp.json()
                 
-            self.cdp_info = data["data"]
-            debug_port = self.cdp_info.get("debug_port")
-            ws_endpoint = self.cdp_info.get("ws", {}).get("puppeteer")
-            
-            logger.info(f"✅ Profile started on port {debug_port}")
-            logger.debug(f"WebSocket endpoint: {ws_endpoint}")
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to start AdsPower profile: {e}")
+                if data["code"] == 0:
+                    break # Success!
+                
+                msg = data.get("msg", "")
+                if "Too many request" in msg:
+                    # Exponential backoff: 2, 4, 8, 16 seconds
+                    wait_time = (2 ** attempt) + (time.time() % 1) 
+                    logger.warning(f"⚠️ AdsPower Rate Limit [Attempt {attempt+1}/{max_attempts}]. Waiting {wait_time:.1f}s...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    logger.error(f"Failed to start profile: {msg}")
+                    return None
+                    
+            except Exception as e:
+                logger.error(f"API request failed: {e}")
+                if attempt < max_attempts - 1:
+                    time.sleep(2)
+                    continue
+                return None
+        
+        if not data or data.get("code") != 0:
+            logger.error(f"Could not start profile {self.profile_id} after {max_attempts} attempts")
             return None
+            
+        self.cdp_info = data["data"]
+        debug_port = self.cdp_info.get("debug_port")
+        ws_endpoint = self.cdp_info.get("ws", {}).get("puppeteer")
+        
+        logger.info(f"✅ Profile started on port {debug_port}")
+        logger.debug(f"WebSocket endpoint: {ws_endpoint}")
+            
+        # except Exception as e:
+        #     logger.error(f"❌ Failed to start AdsPower profile: {e}")
+        #     return None
         
         # Connect to browser via CDP using patchright
         try:

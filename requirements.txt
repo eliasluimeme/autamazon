@@ -8,3 +8,6 @@ pytweening
 unidecode
 python-dotenv
 Faker
+pyotp
+filelock
+psutil

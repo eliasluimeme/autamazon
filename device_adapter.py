@@ -121,6 +121,10 @@ class DeviceAdapter:
             True if successful, False otherwise
         """
         try:
+            if self.page.is_closed():
+                logger.error("Page closed. Cannot tap.")
+                return False
+
             # Small pause before action (human-like)
             time.sleep(random.uniform(0.2, 0.5))
             
@@ -176,6 +180,10 @@ class DeviceAdapter:
             True if successful, False otherwise
         """
         try:
+            if self.page.is_closed():
+                logger.error("Page closed. Cannot type.")
+                return False
+
             # Small pause before typing
             time.sleep(random.uniform(0.1, 0.3))
             
@@ -216,6 +224,10 @@ class DeviceAdapter:
             True if successful
         """
         try:
+            if self.page.is_closed():
+                logger.error("Page closed. Cannot scroll.")
+                return False
+            
             if self.device_type == "mobile" and MOBILE_UTILS_AVAILABLE:
                 logger.debug(f"📱 [Mobile] Scrolling {direction}...")
                 human_like_mobile_scroll(self.page, direction=direction, magnitude=magnitude)
@@ -329,6 +341,10 @@ class DeviceAdapter:
             True if successful
         """
         try:
+            if self.page.is_closed():
+                logger.error("Page closed. Cannot JS click.")
+                return False
+            
             logger.info(f"⚡ Executing JS click on {description}...")
             
             # Ensure element is resolved

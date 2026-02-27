@@ -1,82 +1,90 @@
 """
-Amazon Signup Flow Encapsulation
+Amazon Signup Flow Encapsulation V2
+State-machine based loop for handling signup, login, and verification steps.
 """
 import time
 from loguru import logger
 from amazon.actions.detect_state import detect_signup_state
-from amazon.actions.signup import click_create_account, fill_registration_form, handle_new_customer_intent
+from amazon.actions.signup import click_create_account, fill_registration_form, handle_new_customer_intent, click_continue_registration
 from amazon.actions.interstitials import handle_generic_popups
 from amazon.actions.cart import handle_cart_interstitial
+from amazon.core.session import SessionState
+from amazon.core.interaction import InteractionEngine
+from amazon.actions.ebook_search_flow import detect_cart_state
 
-def run_signup_flow(playwright_page, identity, device) -> bool:
+def run_signup_flow(playwright_page, session: SessionState, device) -> bool:
     """
-    Manages the entire signup/login flow loop until success or failure.
+    Manages the entire signup/login flow loop using SessionState for persistent data.
+    """
+    logger.info("🔄 Starting V2 Unified Signup/Login Flow...")
     
-    Args:
-        playwright_page: Playwright page object
-        identity: Identity object or dict
-        device: DeviceAdapter
+    # Interaction Engine for streamlined clicks/agentql fallback
+    interaction = InteractionEngine(playwright_page, device)
+    
+    # Ensure identity is loaded
+    if not session.identity:
+        from amazon.identity_manager import get_next_identity
+        ident = get_next_identity()
+        if not ident:
+            logger.error("No identity available for signup")
+            return False
+        session.update_identity(ident)
         
-    Returns:
-        True if signup/login was successful (landed on success page/state)
-    """
-    logger.info("🔄 Starting Unified Signup/Login Flow...")
-    
-    max_steps = 15 # Allow sufficient steps for multi-stage login
+    identity = session.identity
+    max_steps = 20 # Increased for robustness
+    consecutive_unknown = 0
     
     for step_idx in range(max_steps):
-        # Always handle popups between steps
+        # 1. Popups
         handle_generic_popups(playwright_page, device)
         
-        # Detect current state
+        # 2. State Detection
         state = detect_signup_state(playwright_page)
         current_url = playwright_page.url
-        logger.info(f"🚦 Signup Flow Step {step_idx + 1}: State='{state}'")
+        logger.info(f"🚦 Signup Step {step_idx + 1}: State='{state}'")
         
-        # --- SUCCESS STATE ---
+        if state == "unknown":
+            consecutive_unknown += 1
+        else:
+            consecutive_unknown = 0
+            
+        if consecutive_unknown >= 3:
+            logger.warning("🔄 Stuck in 'unknown' state during signup. Resetting to retry from eBook search...")
+            session.update_flag("product_selected", False)
+            return False
+        
+        # 3. --- SUCCESS STATE ---
         if state == "success":
             logger.success("✅ Signup/Login successful!")
+            session.update_flag("amazon_signup", True)
             return True
+            
+        # 4. Check for Product Page (Buy Now failed or redirected back)
+        if detect_cart_state(playwright_page) == "product_page":
+            logger.warning("📍 Detected Product Page during Signup Flow. Buy Now must have failed. Resetting for re-selection...")
+            session.update_flag("product_selected", False)
+            return False
             
         # --- ERROR STATE ---
         if state == "error":
-            logger.error("❌ Encountered error state in signup flow")
-            return False
+            logger.error(f"❌ Encountered error state at {current_url}")
+            # Try once to reload if we are stuck on an error
+            playwright_page.reload()
+            time.sleep(3)
+            continue
 
         # --- HANDLING STATES ---
         
         # 1. Unknown / Cart / Ambiguous
         if state == "unknown":
-            # Check for Kindle/ebook purchase success URLs (signup is done!)
-            success_url_patterns = [
-                "/kindle-dbs/clarification",
-                "/kindle-dbs/thankYou",
-                "/gp/digital/",
-                "/gp/your-account",
-                "/ref=nav_ya_signin",
-                "/gp/aw/d/",
-            ]
+            success_url_patterns = ["/kindle-dbs/", "/gp/digital/", "/gp/your-account", "ref=nav_ya_signin"]
             if any(pattern in current_url for pattern in success_url_patterns):
-                logger.success("✅ Signup successful! Detected post-purchase/account page.")
+                logger.success("✅ Signup successful via URL detection.")
+                session.update_flag("amazon_signup", True)
                 return True
                 
-            if "/ap/signin" in current_url.lower() or "/ap/register" in current_url.lower():
-                # Re-check specifically for email entry
-                from amazon.actions.signin_email import is_email_signin_page
-                if is_email_signin_page(playwright_page):
-                    state = "email_signin_entry"
-                    logger.info("Re-detected 'unknown' as 'email_signin_entry'")
-                else:
-                    state = "signin_choice"
-                    logger.info("Re-detected 'unknown' as 'signin_choice' based on URL")
-            elif "/cart" in current_url.lower() or "/gp/cart" in current_url.lower():
-                logger.info("On cart page, attempting to proceed...")
+            if "/cart" in current_url.lower():
                 handle_cart_interstitial(playwright_page, device)
-                time.sleep(2)
-                continue
-            else:
-                logger.warning(f"Unknown state at URL: {current_url}")
-                # Wait briefly and retry detection
                 time.sleep(2)
                 continue
 
@@ -84,45 +92,31 @@ def run_signup_flow(playwright_page, identity, device) -> bool:
         if state == "email_signin_entry":
             logger.info("📧 Handling Email Entry...")
             from amazon.actions.signin_email import handle_email_signin_step
+            # We keep current handler but pass the identity from session
             if handle_email_signin_step(playwright_page, identity, device):
                 time.sleep(2)
                 continue
             else:
-                logger.error("Failed to handle email entry")
-                return False
+                logger.warning("Email entry handler failed, retrying loop...")
 
-        # 3. Signin Choice / Create Account (Variant 1)
+        # 3. Signin Choice / Create Account
         elif state == "signin_choice" or state == "signin":
             logger.info("🆕 Handling Sign-in Choice (Attempting Create Account)...")
-            if click_create_account(playwright_page, device):
+            # Upgrade: try using interaction engine for the click
+            success = interaction.smart_click(
+                "Create Account Button",
+                selectors=["#createAccountSubmit", "#auth-create-account-link", "a:has-text('Create account')"],
+                agentql_query="{ create_account_button }",
+                cache_key="create_account_btn"
+            )
+            if success:
                 time.sleep(2)
                 continue
             else:
-                # Fallback: Check if it's actually email entry (Variant 2)
-                # If we couldn't find "Create account", maybe we are just on the signin form?
-                logger.warning("Failed to select Create Account - Attempting fallback to Email Entry (Variant 2)")
-                
-                # Check for email input
-                email_input = playwright_page.locator("input[name='email']").first
-                if email_input.is_visible(timeout=2000):
-                    logger.info("Found email input - switching to 'email_signin_entry' state")
-                    state = "email_signin_entry"
-                    # We will jump to email_signin_entry logic in the next iteration or right now by modifying loop?
-                    # Since we are inside the loop, we can just continue, but we need to ensure the state variable update persists?
-                    # The loop re-detects state at the top. We need to force it.
-                    # Actually, the loop calls detect_signup_state at start.
-                    # So if we simply continue, detect_signup_state needs to return email_signin_entry.
-                    # It likely already returned signin_choice incorrectly.
-                    
-                    # To force it, we can call handle_email_signin_step DIRECTLY here
-                    logger.info("📧 Executing fallback Email Entry handler immediately...")
-                    from amazon.actions.signin_email import handle_email_signin_step
-                    if handle_email_signin_step(playwright_page, identity, device):
-                        time.sleep(2)
-                        continue
-                        
-                logger.error("Failed to select Create Account and no Email Entry fallback found")
-                return False
+                 # Fallback to legacy handler
+                 if click_create_account(playwright_page, device):
+                     time.sleep(2)
+                     continue
 
         # 4. New Customer Intent
         elif state == "new_customer_intent":
@@ -130,92 +124,53 @@ def run_signup_flow(playwright_page, identity, device) -> bool:
             if handle_new_customer_intent(playwright_page, device):
                 time.sleep(2)
                 continue
-            else:
-                logger.error("Failed to handle new customer intent")
-                return False
 
         # 5. Registration Form
         elif state == "registration_form":
             logger.info("📝 Handling Registration Form...")
             if fill_registration_form(playwright_page, identity, device):
                 time.sleep(1)
-                from amazon.actions.signup import click_continue_registration
-                click_continue_registration(playwright_page, device)
-                time.sleep(3)
-                continue
-            else:
-                logger.error("Failed to fill registration form")
-                return False
+                # Use the robust, unified continue handler instead of ad-hoc smart_click
+                if click_continue_registration(playwright_page, device):
+                    time.sleep(1)
+                    continue
+                else:
+                    logger.error("Failed to click 'Verify email' / 'Continue' even after filling form.")
 
-        # 6. Add Mobile Number (optional step)
+        # 6. Add Mobile Number
         elif state == "add_mobile":
-            logger.info("📱 Handling Add Mobile Number step...")
             from amazon.actions.mobile_verification import handle_add_mobile_step
-            
-            # Try to skip if no phone number provided
-            # In the future, we can pass phone_number from identity
-            phone_number = identity.get('phone', None) if hasattr(identity, 'get') else getattr(identity, 'phone', None)
-            
-            if handle_add_mobile_step(playwright_page, phone_number, device):
-                time.sleep(2)
-                continue
-            else:
-                logger.warning("Mobile verification step not handled, continuing...")
-                time.sleep(2)
-                continue
+            logger.info("📱 Skipping optional mobile number step...")
+            handle_add_mobile_step(playwright_page, identity.phone, device)
+            time.sleep(2)
+            continue
 
-        # 7. Verification (OTP / Puzzle / Email)
-        elif state == "verification" or state == "captcha" or state == "puzzle":
-            logger.info(f"🔒 Handling Verification: {state}")
+        # 7. Verification / Captcha / Puzzle
+        elif state in ["verification", "captcha", "puzzle"]:
+            logger.info(f"🔒 Handling {state}...")
             
             if state == "puzzle":
                 from amazon.actions.puzzle_solver import handle_puzzle_step
-                if handle_puzzle_step(playwright_page):
-                    time.sleep(2)
-                    continue
-                else:
-                    logger.warning("Puzzle solver returned False")
-                    # Should we fail or retry? Let's retry detection
-                    continue
-
-            if state == "captcha":
-                 from amazon.captcha_solver import solve_captcha
-                 solve_captcha(playwright_page)
-                 time.sleep(2)
-                 continue
-            
-            # OTP / Email Code
-            # OTP / Email Code
-            from amazon.actions.email_verification import handle_email_verification
-            
-            # Extract email safely
-            email_val = identity.get('email', '') if hasattr(identity, 'get') else getattr(identity, 'email', str(identity))
-            
-            # Need browser context for email verification, try to get it from page
-            context = playwright_page.context
-            
-            if handle_email_verification(context, playwright_page, device, email_val):
-                 time.sleep(2)
-                 continue
+                handle_puzzle_step(playwright_page)
+            elif state == "captcha":
+                from amazon.captcha_solver import handle_captcha
+                handle_captcha(playwright_page, device)
             else:
-                 # It might return False if it needs manual intervention or failed
-                 logger.warning("Email verification action returned False (might be stuck)")
-                 # We don't abort immediately, maybe state updates?
-                 time.sleep(5) 
-                 continue
+                # OTP
+                from amazon.actions.email_verification import handle_email_verification
+                # Pass browser context from page
+                handle_email_verification(playwright_page.context, playwright_page, device, identity.email)
+            
+            time.sleep(2)
+            continue
 
-        # 7. Passkey Nudge
+        # 8. Passkey Nudge
         elif state == "passkey_nudge":
             from amazon.actions.passkey import handle_passkey_nudge
-            logger.info("🔑 Handling Passkey Nudge (Skipping)...")
-            if handle_passkey_nudge(playwright_page, device):
-                time.sleep(1)
-            else:
-                 logger.warning("Passkey handler returned False")
+            handle_passkey_nudge(playwright_page, device)
             continue
              
-        # Add a sleep to prevent tight loops
         time.sleep(2)
 
-    logger.error("❌ Signup flow timed out (max steps reached)")
+    logger.error("❌ Signup flow timed out")
     return False

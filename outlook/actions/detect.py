@@ -34,8 +34,16 @@ def detect_current_step(page, agentql_page=None) -> str:
     Returns:
         Step name: EMAIL, PASSWORD, NAME, DOB, CAPTCHA, PRIVACY, SUCCESS, or UNKNOWN
     """
-    
-    # Priority 0: Try cached selectors (Fastest, zero cost — XPath then CSS)
+    if page.is_closed():
+        logger.error("Page closed. Cannot detect Outlook step.")
+        return "UNKNOWN"
+        
+    # Priority 0: Network/Browser Error Check (Faster than AgentQL, prevents security errors)
+    if _is_network_error(page):
+        logger.error("🛑 Browser network error detected (Site can't be reached).")
+        return "ERROR"
+        
+    # Priority 0.5: Try cached selectors (Fastest, zero cost — XPath then CSS)
     step = _detect_via_cache(page)
     if step != "UNKNOWN":
         logger.debug(f"Step detected via cache: {step}")
@@ -56,6 +64,43 @@ def detect_current_step(page, agentql_page=None) -> str:
         return step
     
     return "UNKNOWN"
+
+
+def _is_network_error(page) -> bool:
+    """Detect if we are on a browser error page."""
+    try:
+        # Check for specific network error codes in title or body
+        title = page.title().lower()
+        if "site can't be reached" in title or "error" in title:
+            return True
+        
+        # Check for common error page elements (Chromium)
+        error_indicators = [
+            "#main-frame-error",
+            "#diagnose-button",
+            "text=ERR_TUNNEL_CONNECTION_FAILED",
+            "text=ERR_CONNECTION_REFUSED",
+            "text=ERR_NAME_NOT_RESOLVED",
+            "text=ERR_CONNECTION_TIMED_OUT"
+        ]
+        for sel in error_indicators:
+            try:
+                if page.locator(sel).first.is_visible(timeout=200):
+                    return True
+            except: pass
+        
+        # Check for empty/blank page content (Accessibility tree failure often correlates)
+        content = page.content()
+        if len(content) < 300 and "<html><head></head><body>" in content.lower():
+            return True
+            
+    except Exception as e:
+        err_msg = str(e).lower()
+        # SecurityError: Failed to read 'localStorage' often means we are on a browser-internal/error page
+        if "access is denied" in err_msg or "securityerror" in err_msg:
+            return True
+        pass
+    return False
 
 
 def _detect_via_cache(page) -> str:

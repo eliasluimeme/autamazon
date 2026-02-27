@@ -14,6 +14,7 @@ from loguru import logger
 from amazon.config import DELAYS
 from amazon.element_locator import ElementLocator
 from amazon.device_adapter import DeviceAdapter
+from amazon.core.interaction import InteractionEngine
 
 
 def handle_new_customer_intent(page, device: DeviceAdapter = None) -> bool:
@@ -568,164 +569,79 @@ def fill_registration_form(page, identity, device: DeviceAdapter = None) -> bool
 def click_continue_registration(page, device: DeviceAdapter = None) -> bool:
     """
     Click the Verify email or Continue button on registration form.
+    Uses InteractionEngine with Biomechanical priority.
     """
     if device is None:
         device = DeviceAdapter(page)
     
-    logger.info("Clicking Verify email / Continue...")
+    interaction = InteractionEngine(page, device)
     initial_url = page.url
     
-    # Method 1: Direct CSS selectors FIRST (faster than AgentQL)
-    css_selectors = [
-        "input[type='submit'][value='Verify email']",
-        "input#continue[type='submit']",
-        "input[type='submit'][value*='Verify']",
-        "input[type='submit'][value*='Continue']",
-        "button:has-text('Verify email')",
-        "button:has-text('Continue')",
-        "#continue",
-        "form input[type='submit']",
-    ]
+    logger.info("🛒 Clicking 'Verify email' / Continue button...")
     
-    for selector in css_selectors:
-        try:
-            btn = page.locator(selector).first
-            if btn.is_visible(timeout=500):
-                logger.info(f"Found button via: {selector}")
-                device.scroll_to_element(btn, "Submit Button")
-                time.sleep(0.2)
-                
-                # Use JS click for reliability
-                device.js_click(btn, f"Submit Button ({selector})")
-                time.sleep(1.5)
-                
-                # Check for state change
-                new_url = page.url
-                if new_url != initial_url:
-                    logger.success(f"✓ Form submitted, URL changed ({selector})")
-                    return True
-                    
-                # Check if we moved to verification or error state
-                try:
-                    if (page.locator("text='Enter the code'").first.is_visible(timeout=500) or
-                        page.locator("text='Verify email address'").first.is_visible(timeout=500) or
-                        page.locator("input[name='code']").first.is_visible(timeout=500) or
-                        page.locator("#cvf-input-code").first.is_visible(timeout=500)):
-                        logger.success("✓ Verification page detected")
-                        return True
-                except:
-                    pass
-                
-                # Retry with force click if JS click didn't navigate
-                logger.warning(f"JS click ({selector}) didn't navigate, retrying with force click...")
-                try:
-                    btn.click(force=True)
-                    time.sleep(1.5)
-                    if page.url != initial_url:
-                        return True
-                except:
-                    pass
-        except Exception as e:
-            logger.debug(f"Selector {selector} failed: {e}")
-            continue
+    success = interaction.smart_click(
+        description="Verify Email Button",
+        selectors=[
+            "input[type='submit'][value='Verify email']",
+            "input#continue[type='submit']",
+            "#continue",
+            "input[name='continue']",
+            "input.a-button-input",
+            ".a-button input",
+            "#ap_register_form input[type='submit']",
+            "input[type='submit'][value*='Verify']",
+            "input[type='submit'][value*='Continue']",
+            "button:has-text('Verify email')",
+            "button:has-text('Continue')",
+            "xpath=//*[@id='continue']",
+            "xpath=//*[@id='cvf-submit-otp-button']/span/input",
+            "xpath=//*[@id='cvf-submit-otp-button-announce']",
+            "form input[type='submit']",
+            "text='Verify email'",
+            "button[type='submit']"
+        ],
+        agentql_query="{ verify_email_button(The yellow button that says 'Verify email' or 'Continue' to submit the registration form) }",
+        cache_key="amazon_verify_email",
+        biomechanical=True
+    )
     
-    # Method 2: XPath selectors
-    xpath_selectors = [
-        "//input[@type='submit' and @value='Verify email']",
-        "//input[@id='continue' and @type='submit']",
-        "//input[@type='submit' and contains(@value, 'Verify')]",
-        "//input[@type='submit' and contains(@value, 'Continue')]",
-        "//form//input[@type='submit']",
-    ]
-    
-    for xpath in xpath_selectors:
-        try:
-            element = page.locator(f"xpath={xpath}").first
-            if element.is_visible(timeout=300):
-                logger.info(f"Clicking via XPath: {xpath[:40]}...")
-                device.scroll_to_element(element, "Button")
-                
-                # Use JS click
-                device.js_click(element, f"Button ({xpath})")
-                time.sleep(1.5)
-                
-                if page.url != initial_url:
-                    return True
-                
-                # Retry with force click
-                logger.warning(f"JS click ({xpath}) didn't navigate, retrying with force click...")
-                try:
-                    element.click(force=True)
-                    time.sleep(1.5)
-                    if page.url != initial_url:
-                        return True
-                except:
-                    pass
-        except:
-            continue
-    
-    # Method 3: JS click fallback - directly find and click the submit button
-    logger.info("Trying JS click fallback...")
-    try:
-        result = page.evaluate("""
-            () => {
-                // Find visible submit button
-                const submitBtns = document.querySelectorAll('input[type="submit"], button[type="submit"]');
-                for (const btn of submitBtns) {
-                    if (btn.offsetParent !== null && btn.value && 
-                        (btn.value.includes('Verify') || btn.value.includes('Continue'))) {
-                        btn.click();
-                        return 'clicked: ' + btn.value;
-                    }
-                }
-                // Fallback: any visible submit in form
-                const form = document.querySelector('form');
-                if (form) {
-                    const submit = form.querySelector('input[type="submit"]');
-                    if (submit && submit.offsetParent !== null) {
-                        submit.click();
-                        return 'clicked form submit';
-                    }
-                }
-                return null;
-            }
-        """)
-        if result:
-            logger.success(f"✓ Button clicked via JS: {result}")
-            time.sleep(1.5)
-            if page.url != initial_url:
-                return True
-            # Check content change
+    if not success:
+        logger.error("❌ Could not click 'Verify email' button via any method.")
+        return False
+        
+    # Wait and verify progression
+    logger.info("⏳ Monitoring for transition after 'Verify email' click...")
+    for _ in range(20):
+        current_url = page.url.lower()
+        
+        # 1. Success indicator: URL changed or verification page reached
+        if ("/ap/register" not in current_url and "/ap/signin" not in current_url) or "/ap/cvf" in current_url:
+             # Check for verification indicators
+             try:
+                 if (page.locator("input[name='code']").first.is_visible(timeout=100) or
+                     page.locator("#cvf-input-code").first.is_visible(timeout=100) or
+                     "verification" in current_url):
+                     logger.success("✅ Transitioned to Verification - Success!")
+                     return True
+             except: pass
+
+        # 2. Check for form errors
+        error_selectors = [".a-alert-error", "#auth-error-message-box", "text='There was a problem'"]
+        for sel in error_selectors:
             try:
-                if page.locator("input[name='code'], #cvf-input-code").first.is_visible(timeout=1000):
-                    return True
-            except:
-                pass
-    except Exception as e:
-        logger.debug(f"JS click failed: {e}")
-    
-    # Method 4: AgentQL as last resort
-    try:
-        from amazon.agentql_helper import query_amazon
-        results = query_amazon(page, "registration_form", cache=True)
-        for key in ['continue_button', 'create_account_button']:
-            if key in results and results[key].get('element'):
-                btn = results[key]['element']
-                try:
-                    btn.click(timeout=3000)
-                except:
-                    try:
-                        btn.click(force=True, timeout=2000)
-                    except:
-                        pass
-                time.sleep(1.5)
-                if page.url != initial_url:
-                    return True
-    except:
-        pass
+                if page.locator(sel).first.is_visible(timeout=50):
+                    error_text = page.locator(sel).first.text_content().strip()
+                    logger.error(f"❌ Form submission failed error: {error_text}")
+                    return False
+            except: continue
             
-    logger.warning("Could not click Verify/Continue button")
-    return page.url != initial_url
+        time.sleep(0.5)
+        
+    if page.url == initial_url:
+        logger.warning("⚠️ Still on registration page after 10s. Click might have failed silently.")
+        return False
+        
+    return True
 
 
 def detect_signup_state(page) -> str:

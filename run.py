@@ -1,279 +1,160 @@
 """
-Amazon Automation - Main Entry Point
-
-Automates product browsing and purchasing on Amazon.
-Supports both mobile and desktop devices with human-like interactions.
-
-Usage:
-    python amazon/run.py <PROFILE_ID> [--product "search term"]
-
-Example:
-    python amazon/run.py k18imh7u
-    python amazon/run.py k18imh7u --product "bluetooth speaker"
+Amazon Automation - Main Entry Point V2
+Orchestrates the entire flow using SessionState and State Machines.
 """
-
 import sys
 import os
 import time
 import argparse
+import signal
 import agentql
+from loguru import logger
 
 # Configure paths
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../social-ui')))
+root_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(root_dir)
+
+if root_dir not in sys.path:
+    sys.path.insert(0, root_dir)
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
 
 # Configure logging
-from loguru import logger
 logger.remove()
-logger.add(sys.stderr, level="DEBUG")
+logger.add(sys.stderr, level="INFO")
+logger.add("logs/automation.log", level="DEBUG", rotation="10 MB")
 
-# Import automation modules
+# Import core modules
 try:
     from modules.opsec_workflow import OpSecBrowserManager
 except ImportError as e:
-    logger.error(f"Could not import OpSecBrowserManager: {e}")
-    import traceback
-    logger.error(traceback.format_exc())
+    logger.error("Could not import OpSecBrowserManager. Check your environment/path.")
     sys.exit(1)
 
-# Import amazon automation components
-from amazon.config import get_random_product, DELAYS
+from amazon.core.session import SessionState
 from amazon.device_adapter import DeviceAdapter
-from amazon.element_locator import ElementLocator
-from amazon.actions.navigate import navigate_to_amazon, wait_for_page_load, check_page_state
-from amazon.actions.search import search_product, wait_for_search_results
-from amazon.actions.product import select_random_product, click_buy_now, clear_product_session, is_product_unavailable
 from amazon.actions.ebook_search_flow import run_ebook_search_flow
-from amazon.actions.product_search_flow import run_product_search_flow
-from amazon.actions.signup import (
-    click_create_account,
-    detect_signup_state,
-    fill_registration_form,
-    click_continue_registration
-)
-from amazon.actions.developer_registration import (
-    navigate_to_developer_registration,
-    fill_developer_registration_form,
-    handle_2step_verification_prompt
-)
-from amazon.actions.cart import handle_cart_interstitial
-from amazon.identity_manager import mark_identity_used
+from amazon.actions.signup_flow import run_signup_flow
+from amazon.actions.developer_registration import run_developer_registration
+from amazon.actions.two_step_verification import run_2fa_setup_flow
 
-
-def run_amazon_automation(profile_id: str, product_name: str = None, skip_outlook: bool = False):
-    """
-    Main automation workflow.
+def run_amazon_automation(profile_id: str, product_name: str = None):
+    """Refactored main flow using session persistence and state machines."""
+    logger.info(f"🚀 Initializing V2 Automation for Profile: {profile_id}")
     
-    Steps:
-    0. Launch browser via AdsPower
-    1. Detect device type (mobile/desktop)
-    2. Create Outlook account
-    3. Navigate to amazon.com
-    4. Search for ebook
-    5. Select random ebook from results
-    6. Click Buy Now
-    7. Click Create Account (if on sign-in page)
+    # 1. Initialize Session State
+    session = SessionState(profile_id)
+    session.load()
     
-    Args:
-        profile_id: AdsPower profile ID
-        product_name: Optional product to search for (random if not specified)
-        skip_outlook: Whether to skip Outlook signup step
-    """
-    logger.info("=" * 50)
-    logger.info("🛒 Amazon Automation Starting")
-    logger.info(f"Profile ID: {profile_id}")
-    logger.info("=" * 50)
-    
-    # Get random product if not specified
-    if product_name is None:
-        product_name = get_random_product()
-    logger.info(f"Target product: {product_name}")
-    
-    # Initialize browser manager
+    # 2. Launch Browser
     manager = OpSecBrowserManager(profile_id)
     
+    # Signal handler for clean exit
+    def signal_handler(sig, frame):
+        logger.warning(f"Received signal {sig}, cleaning up...")
+        manager.stop_browser()
+        sys.exit(1)
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
     try:
-        # Step 1: Launch browser
-        logger.info("📱 Launching browser...")
         manager.start_browser(headless=False)
-        playwright_page = manager.context.new_page()
-        page = agentql.wrap(playwright_page)
-        
-        # Step 2: Detect device type BEFORE navigation
-        logger.info("🔍 Detecting device type...")
+        # Handle case where context or pages might be empty
+        playwright_page = None
+        if manager.context and manager.context.pages:
+            playwright_page = manager.context.pages[0]
+        elif manager.context:
+            playwright_page = manager.context.new_page()
+            
+        if not playwright_page:
+            logger.error("Failed to acquire a page from the browser.")
+            return False
+            
+        # 3. Detect Device
         device = DeviceAdapter(playwright_page)
-        locator = ElementLocator(playwright_page, device.device_type)
         
-        # Step 0: Outlook Signup (if not skipped)
-        generated_identity = None
-        if not skip_outlook:
+        # --- PHASE 1: Outlook Setup (Optional but prioritized) ---
+        if not session.identity and not session.completion_flags.get("outlook_created", False):
+            logger.info("📬 Phase: Outlook Setup")
             from amazon.actions.outlook_flow import handle_outlook_setup
             generated_identity, new_page = handle_outlook_setup(manager, playwright_page, device)
             
             if generated_identity and new_page:
-                # Update page reference
+                session.update_identity(generated_identity)
+                session.update_flag("outlook_created", True)
                 playwright_page = new_page
                 device.page = playwright_page
-                locator = ElementLocator(playwright_page, device.device_type)
             else:
+                logger.error("🛑 CRITICAL: Outlook setup failed. Cannot proceed without a valid identity.")
                 return False
-        
-        # Step 3, 4 & 5: eBook Search and Selection Flow
-        # This replaces the original product search logic
-        if not run_ebook_search_flow(playwright_page, device, locator):
-            logger.error("Failed to complete eBook search and selection flow")
-            return False
-        
-        product_selected = True
-        
-        # Wait for page after Buy Now
-        time.sleep(3)  # Give page time to redirect
-        
-        # Wait for network to settle
-        try:
-            playwright_page.wait_for_load_state("networkidle", timeout=10000)
-        except:
-            pass  # Timeout is OK
-        
-        # Step 6.5: Handle Cart Interstitial (if any)
-        # If we clicked Add to Cart or redirected to cart, go to checkout
-        # handle_cart_interstitial(playwright_page, device)
-        # time.sleep(2)
-        
-        # Prepare identity (Generated from Outlook or form file)
-        from amazon.identity_manager import get_next_identity, mark_identity_used
-        identity = generated_identity
-        if not identity:
-            identity = get_next_identity()
 
-        # Final check for address popups before starting main actions
-        from amazon.actions.interstitials import handle_generic_popups
-        handle_generic_popups(playwright_page, device)
+        # --- PHASE 2: eBook Selection ---
+        if not session.completion_flags.get("product_selected", False):
+            logger.info("🛒 Phase: Product Selection")
+            if run_ebook_search_flow(playwright_page, device, session):
+                session.update_flag("product_selected", True)
+            else:
+                logger.error("Failed at Product Selection")
+                return False
 
-        # Step 7 & 8: Unified Signup Flow
-        from amazon.actions.signup_flow import run_signup_flow
-        
-        if not run_signup_flow(playwright_page, identity, device):
-            logger.error("Signup flow failed or timed out")
-            return False
-            
-        logger.info("✅ Signup flow managed successfully")
-        
-        # Step 10: Amazon Developer Registration
-        logger.info("🛠️ Starting Amazon Developer Registration...")
-        
-        # Ensure identity exists (for testing/skipped flows)
-        if 'identity' not in locals() or identity is None:
-            logger.info("Identity not defined, attempting to resolve from browser session...")
-            from amazon.actions.identity_sync import resolve_identity_from_session
-            identity = resolve_identity_from_session(playwright_page)
-            
-            if not identity:
-                logger.warning("Could not resolve identity execution, creating dummy identity for Developer Registration test...")
-                from amazon.identity_manager import Identity
-                identity = Identity(
-                    firstname="Jeremy",
-                    lastname="Jones", 
-                    email="jeremy_c4li_04@outlook.com",
-                    password="password123", # Dummy
-                    address_line1="123 Example St",
-                    city="Seattle",
-                    state="WA",
-                    zip_code="98109",
-                    country="Australia",
-                    phone="206-555-0199"
-                )
-        else:
-            # Even if identity is defined, double check against session if we suspect mismatch
-            # (e.g. if we just did a fresh signup, it should be correct. If we skipped lookup, it might be wrong)
-            from amazon.actions.identity_sync import resolve_identity_from_session
-            # Only override if we find a STRONG match that is different?
-            # For now, let's just trust resolve_identity_from_session to return current if it matches or can't find better
-            identity = resolve_identity_from_session(playwright_page, identity)
+        # --- PHASE 3: Signup / Login ---
+        if not session.completion_flags.get("amazon_signup", False):
+            logger.info("👤 Phase: Identity & Signup")
+            if run_signup_flow(playwright_page, session, device):
+                logger.success("✓ Signup/Login complete")
+            else:
+                logger.error("Failed at Signup/Login")
+                return False
 
-        # Wrap page with AgentQL for robust element finding
-        # We wrap it, but we primarily use the SYNC playwright_page for interactions
-        aql_page = agentql.wrap(playwright_page)
-        
-        # Navigate using SYNC page
-        navigate_to_developer_registration(playwright_page)
-        
-        # # Fill form using SYNC page, with AgentQL fallback
-        if fill_developer_registration_form(playwright_page, identity, device, aql_page=aql_page):
-            logger.success("✓ Developer registration form submitted")
-            time.sleep(5)
-            # Handle 2FA prompt if it appears
-            handle_2step_verification_prompt(playwright_page)
-            
-            logger.success("🎉 Amazon Developer Registration Complete!")
-        else:
-            logger.warning("⚠️ Developer registration failed or skipped")
+        # --- PHASE 4: Developer Registration ---
+        if not session.completion_flags.get("dev_registration", False):
+            logger.info("🛠️ Phase: Developer Registration")
+            # Ensure we use the latest page (in case previous phase changed it)
+            playwright_page = device.page
+            if run_developer_registration(playwright_page, session, device):
+                logger.success("✓ Developer Registration complete")
+            else:
+                logger.error("Failed at Developer Registration")
+                return False
 
-        # --- 2FA Setup ---
-        logger.info("🛠️ Setting up Amazon 2-Step Verification...")
-        from amazon.actions.two_step_verification import setup_2fa
-        if setup_2fa(playwright_page, identity):
-            logger.success("✅ 2-Step Verification configured successfully")
-        else:
-            logger.warning("⚠️ 2-Step Verification setup failed")
-        # ---------------------------
-        
-        mark_identity_used(identity, success=True, notes="Account created")
-        # else:
-        #     logger.error(f"❌ Automation finished without reaching success state (State: {post_signup_state})")
-        #     mark_identity_used(identity, success=False, notes=f"Finished at {post_signup_state}")
-        #     return False
+        # --- PHASE 5: 2FA Setup ---
+        if not session.completion_flags.get("2fa_enabled", False):
+            logger.info("🔐 Phase: 2FA Activation")
+            # Ensure we use the latest page
+            playwright_page = device.page
+            if run_2fa_setup_flow(playwright_page, session, device):
+                logger.success("✓ 2FA Activation complete")
+            else:
+                logger.error("Failed at 2FA Setup")
+                return False
 
-        #     # Success!
-        #     logger.success("=" * 50)
-        #     logger.success("✅ Amazon Automation Complete!")
-        #     logger.success(f"Product searched: {product_name}")
-        #     logger.success("=" * 50)
-            
-            # Keep browser open for observation
-        logger.info("Browser will remain open. Press Ctrl+C to close.")
-        while True:
-            time.sleep(1)
+        logger.success(f"🏁 ALL PHASES COMPLETE for Profile {profile_id}")
+        return True
 
-        
-    except KeyboardInterrupt:
-        logger.info("User interrupted, closing browser...")
     except Exception as e:
-        logger.error(f"Automation failed: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
+        logger.exception(f"Unexpected error in automation: {e}")
         return False
     finally:
         manager.stop_browser()
-    
-    return True
-
 
 def main():
-    """Parse arguments and run automation."""
-    parser = argparse.ArgumentParser(
-        description="Amazon product browsing automation"
-    )
-    parser.add_argument(
-        "profile_id",
-        help="AdsPower profile ID"
-    )
-    parser.add_argument(
-        "--product", "-p",
-        help="Product to search for (random if not specified)",
-        default=None
-    )
-    
+    parser = argparse.ArgumentParser(description="Amazon V2 Automation")
+    parser.add_argument("profile_id", help="AdsPower profile ID")
+    parser.add_argument("--product", "-p", help="Product to search", default=None)
     args = parser.parse_args()
     
-    if not args.profile_id:
-        logger.error("No profile ID provided")
-        parser.print_help()
+    try:
+        success = run_amazon_automation(args.profile_id, args.product)
+        if not success:
+            logger.error(f"Automation failed for profile {args.profile_id}")
+            sys.exit(1)
+        sys.exit(0)
+    except SystemExit as e:
+        sys.exit(e.code)
+    except Exception as e:
+        logger.error(f"Main execution error: {e}")
         sys.exit(1)
-    
-    run_amazon_automation(args.profile_id, args.product)
-
 
 if __name__ == "__main__":
     main()

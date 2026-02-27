@@ -1,298 +1,499 @@
+"""
+Amazon Developer Registration Flow V2
+Includes robust React-aware dropdown handling and state machine orchestration.
+"""
 import time
-import random
 from loguru import logger
-from amazon.device_adapter import DeviceAdapter
-from amazon.agentql_helper import query_amazon
+from amazon.core.session import SessionState
+from amazon.core.interaction import InteractionEngine
+from amazon.utils.xpath_cache import get_cached_xpath, extract_and_cache_xpath
+import agentql
 
 REGISTRATION_URL = "https://developer.amazon.com/settings/console/registration?return_to=/settings/console/home"
 
-def navigate_to_developer_registration(page):
-    """Navigate to the developer registration page."""
-    logger.info(f"🌐 Navigating to developer registration: {REGISTRATION_URL}")
-    page.goto(REGISTRATION_URL, wait_until="load", timeout=60000)
-    time.sleep(2)
-
-def fill_developer_registration_form(page, identity, device: DeviceAdapter, aql_page=None):
-    """Fills the developer registration form with proper dropdown handling."""
-    logger.info("📝 Filling developer registration form...")
-    
-    # Wait for page to stabilize
-    time.sleep(2)
-    
-    filled_fields = []
-    
-    # Map country names to abbreviations for phone prefix
-    country_abbrev_map = {
-        "United States": "US",
-        "Australia": "AU",
-        "United Kingdom": "GB",
-        "Canada": "CA",
-        "Germany": "DE",
-        "France": "FR",
-        "Spain": "ES",
-        "Italy": "IT",
-        "Netherlands": "NL",
-        "Brazil": "BR",
-        "Mexico": "MX",
-        "Japan": "JP",
-        "India": "IN",
-    }
-    country_abbrev = country_abbrev_map.get(identity.country, "US")
-    
-    # ===== 1. Country Selection (React Styled Dropdown) =====
-    logger.info(f"Filling Country: {identity.country}...")
-    country_selected = False
+def _safe_is_visible(locator, timeout=500) -> bool:
+    """Safe visibility check that never raises Patchright locator errors."""
     try:
-        # Use specific country input selector: #country_code
-        # User Feedback: "after clicking the input dont wait, type the country and click on the first option."
-        country_input = page.locator("#country_code").first
+        # Avoid .first if possible as it triggers 'Can't query n-th element' in some cases
+        return locator.is_visible(timeout=timeout)
+    except Exception:
+        return False
+
+def detect_dev_state(page) -> str:
+    """Detect current state of the developer registration flow."""
+    if page.is_closed():
+        return "unknown"
         
-        if country_input.is_visible(timeout=3000):
-            # 1. Click to open (Fire and forget style)
-            try:
-                # Use very short timeout. If it acts up, we assume it's open/focused or we use JS next.
-                country_input.click(timeout=1000, force=True)
-            except:
-                # If click times out, it might be stuck waiting for animation, but input might be focused.
-                # Just ensure focus with JS and move on.
-                logger.debug("Click timed out, forcing focus via JS and proceeding...")
-                try: 
-                    page.evaluate("document.querySelector('#country_code').focus()")
-                except: pass
-            
-            # 2. Type immediately (Don't wait)
-            try:
-                # Force fill/type
-                country_input.fill("") 
-                country_input.type(identity.country, delay=30)
-            except:
-                # Fallback to global keyboard if element interaction fails
-                page.keyboard.type(identity.country, delay=30)
-            
-            time.sleep(0.5) # Wait for dropdown logic
-            
-            # 3. Click first option
-            dropdown_option_selectors = [
-                # User-provided XPath
-                "xpath=//*[@id='root']/div/div[2]/div[2]/div[3]/div/div[3]/div/div/div[2]/div/div[1]/div[1]",
-                # User-provided CSS selector (simplified)
-                ".sc-caSCKo .sc-eqIVtm",
-                # Fallback: first option in any dropdown
-                "[role='option']:first-child",
-                "div[class*='flinDQ'] > div:first-child > div",
-            ]
-            
-            for sel in dropdown_option_selectors:
-                try:
-                    option = page.locator(sel).first
-                    if option.is_visible(timeout=2000):
-                        # Force click with short timeout to avoid waiting if dropdown disappears
-                        try:
-                            option.click(force=True, timeout=1000) 
-                        except:
-                            pass # Assume click worked if element disappeared
-                        
-                        filled_fields.append("country")
-                        country_selected = True
-                        logger.info(f"✓ Country selected: {identity.country}")
-                        break
-                except:
-                    continue
-        
-        # Wait for form to potentially update/reload after country selection
-        time.sleep(1)
-                    
-    except Exception as e:
-        logger.warning(f"Error selecting country: {e}")
-
-    # ===== 2. Text Input Fields (Sequential & Explicit) =====
-    # User provided specific IDs/XPaths. We fill them in order.
-    logger.info("Filling text fields...")
+    url = page.url.lower()
     
-    fields_to_fill = [
-        # (name, selector, value)
-        ("Customer facing business name", "#company_name", identity.full_name),
-        ("Address line 1", "#address_line", identity.address_line1),
-        ("City", "#city", identity.city),
-        ("Postal code", "#postal_code", identity.zip_code),
-        ("State", "#state", identity.state),
-    ]
-
-    for name, selector, value in fields_to_fill:
-        try:
-            # Try ID first, then fallback to xpath if needed (though ID should work)
-            field = page.locator(selector).first
-            if not field.is_visible(timeout=2000):
-                # Fallback to xpath based on ID if simple selector fails
-                xpath = f"//*[@id='{selector.replace('#', '')}']"
-                field = page.locator(f"xpath={xpath}").first
-            
-            if field.is_visible(timeout=2000):
-                # Fire and forget click (don't wait for event)
-                try:
-                    field.click(force=True, timeout=1000)
-                except:
-                    pass # Proceed to type even if click times out
-                
-                # Check visibility again just in case, then type
-                field.fill("")
-                # Type with small delay to ensure it registers
-                field.type(str(value), delay=20)
-                filled_fields.append(name)
-                logger.info(f"✓ Filled {name}")
-            else:
-                logger.warning(f"⚠️ Could not find field: {name} ({selector})")
-        except Exception as e:
-            logger.error(f"Error filling {name}: {e}")
-
-    # ===== 3. Checkbox: Same as primary email =====
-    try:
-        # User feedback: click on label
-        checkbox_selector = "#root > div > div.sc-cSHVUG.gEudZe.sc-iujRgT.jrEifw > div.sc-cSHVUG.gEudZe.sc-kpOJdX.czKwHF.sc-VJcYb.kcqpRp > div.sc-cooIXK.eYqdWn > div > label"
-        checkbox = page.locator(checkbox_selector).first
-        if not checkbox.is_visible(timeout=2000):
-             checkbox = page.locator("xpath=//*[@id='root']/div/div[2]/div[4]/div[6]/div/label").first
-             
-        if checkbox.is_visible(timeout=2000):
-            # Fire and forget click for checkbox/label
-            try:
-                checkbox.click(force=True, timeout=1000)
-                logger.info("✓ Clicked 'Same as primary email'")
-            except: 
-                pass
-    except Exception as e:
-        logger.warning(f"Error clicking checkbox: {e}")
-
-    # ===== 4. Phone Prefix Dropdown (Preserved) =====
-    try:
-        phone_prefix_selected = False
-        
-        # User-provided selector for phone prefix input: #phonemenu > input
-        phone_prefix_input = page.locator("#phonemenu > input").first
-        if not phone_prefix_input.is_visible(timeout=2000):
-             # Try XPath fallback
-             phone_prefix_input = page.locator("xpath=//*[@id='phonemenu']/input").first
-        
-        if phone_prefix_input.is_visible(timeout=2000):
-            # 1. Click to open (Fire and forget style)
-            try:
-                phone_prefix_input.click(timeout=1000, force=True)
-            except:
-                logger.debug("Phone prefix click timed out, trying JS click...")
-                page.evaluate("""
-                    const el = document.querySelector('#phonemenu > input') || document.evaluate("//*[@id='phonemenu']/input", document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
-                    if (el) el.click();
-                """)
-            
-            # 2. Type immediately
-            try:
-                phone_prefix_input.fill("")
-                phone_prefix_input.type(country_abbrev, delay=40)
-            except:
-                logger.debug("Phone prefix type failed, using keyboard...")
-                phone_prefix_input.click(force=True)
-                page.keyboard.type(country_abbrev, delay=40)
-                
-            time.sleep(0.5)
-            
-            # 3. Click first option
-            phone_option_selectors = [
-                "xpath=//*[@id='root']/div/div[2]/div[4]/div[7]/div/div[3]/div/div[1]/div[2]/div/div[1]/div[1]",
-                ".sc-caSCKo .sc-eqIVtm",
-                "[role='option']:first-child",
-                "div[class*='flinDQ'] > div:first-child > div",
-            ]
-            
-            for sel in phone_option_selectors:
-                try:
-                    option = page.locator(sel).first
-                    if option.is_visible(timeout=2000):
-                         # Force click with short timeout
-                        try:
-                            option.click(force=True, timeout=1000)
-                        except:
-                            pass
-                        phone_prefix_selected = True
-                        logger.info(f"✓ Phone prefix selected: {country_abbrev}")
-                        break
-                except:
-                    continue
-                    
-    except Exception as e:
-        logger.debug(f"Phone prefix error: {e}")
-
-    # ===== 5. Phone Number Field =====
-    try:
-        phone_selector = "#company_phone"
-        phone_input = page.locator(phone_selector).first
-        if not phone_input.is_visible(timeout=2000):
-            phone_input = page.locator("xpath=//*[@id='company_phone']").first
-        
-        if phone_input.is_visible(timeout=2000):
-            current = phone_input.input_value()
-            if current != identity.phone:
-                # Fire and forget click
-                try:
-                    phone_input.click(force=True, timeout=1000)
-                except:
-                    pass
-                
-                phone_input.fill("")
-                phone_input.type(identity.phone, delay=30)
-                filled_fields.append("phone")
-                logger.info("✓ Filled phone")
-        else:
-            logger.warning("⚠️ Phone input field not found")
-    except Exception as e:
-        logger.debug(f"Phone input error: {e}")
-
-    # ===== 6. Submit Button =====
-    time.sleep(0.5)
-    submit_selector = "#registrationSubmit"
+    # 1. Success / Identity Verification (Post-registration)
+    # Success markers: Console Home, IDV Landing, or Dashboard indicators
+    # We strip the query params to avoid false positives from 'return_to' parameters in the registration URL
+    base_url = url.split('?')[0]
+    is_on_home = "/settings/console/home" in base_url or "/idv/landing_page" in base_url or "console/home" in base_url
     
-    form_submitted = False
-    try:
-        btn = page.locator(submit_selector).first
-        if not btn.is_visible(timeout=1000):
-             btn = page.locator("xpath=//*[@id='registrationSubmit']").first
-             
-        if btn.is_visible(timeout=2000):
-            # Use force click to avoid "element is not stable" or scrolling issues
-            try:
-                btn.click(force=True)
-            except:
-                pass
-            form_submitted = True
-            logger.success("✓ Developer registration form submitted!")
-    except Exception as e:
-         logger.error(f"Error submitting form: {e}")
-    
-    return form_submitted
+    # Dashboard indicators should be specific to the post-registration view
+    has_dashboard_indicators = _safe_is_visible(page.get_by_text("Identity Verification"), timeout=500) or \
+                               _safe_is_visible(page.get_by_text("Your apps"), timeout=500)
+                               
+    has_registration_indicators = _safe_is_visible(page.get_by_text("Registration"), timeout=500) or \
+                                  _safe_is_visible(page.locator("#company_name"), timeout=500)
 
-def handle_2step_verification_prompt(page):
-    """Handles the 2-step verification prompt (QR code)."""
+    # Success if we are on the home path OR we see dashboard content and NOT registration content
+    if is_on_home or (has_dashboard_indicators and not has_registration_indicators):
+        # Additional safety: if the path still contains '/registration', it's NOT a success yet
+        if "/registration" in base_url:
+            return "registration_form"
+        return "success"
+        
+    # 2. 2FA Authenticator Prompt
+    if _safe_is_visible(page.get_by_text("Enroll a 2-Step Verification authenticator"), timeout=500) or \
+       _safe_is_visible(page.get_by_text("Use an authenticator app"), timeout=500):
+        return "2fa_prompt"
+        
+    # 3. Address Clarification Interstitial
+    if "clarification" in url or "invalid-address" in url:
+        return "address_clarification"
+
+    # 4. Registration Form
+    # Strict check: URL must contain 'registration' but NOT 'idv' or 'clarification'
+    if ("/registration" in base_url and "/idv/" not in base_url) or _safe_is_visible(page.locator("#company_name"), timeout=500):
+        return "registration_form"
+        
+    return "unknown"
+
+def run_developer_registration(playwright_page, session: SessionState, device) -> bool:
+    """State-machine driven Developer Registration."""
+    logger.info("🔄 Starting V2 Developer Registration Flow...")
+    
+    # User Request: Use a new tab and close the old one to avoid TargetClosedError
     try:
-        if page.locator("text='Enroll a 2-Step Verification authenticator'").first.is_visible(timeout=5000) or \
-           page.locator("text='Use an authenticator app'").first.is_visible(timeout=5000):
+        logger.info("🆕 Switching to fresh tab for Developer Registration...")
+        context = playwright_page.context
+        new_page = context.new_page()
+        if playwright_page and not playwright_page.is_closed():
+            # Try to close, but don't crash if it fails
+            try: playwright_page.close()
+            except: pass
+        playwright_page = new_page
+        device.page = playwright_page
+    except Exception as e:
+        logger.warning(f"Could not recycle tab: {e}")
+
+    interaction = InteractionEngine(playwright_page, device)
+    
+    if not session.identity:
+        logger.error("No identity in session for Developer Registration")
+        return False
+        
+    identity = session.identity
+    
+    max_steps = 10
+    for step in range(max_steps):
+        if playwright_page.is_closed():
+            logger.warning("Tab closed unexpectedly in state loop. Re-acquiring...")
+            try:
+                playwright_page = playwright_page.context.new_page()
+                device.page = playwright_page
+                interaction = InteractionEngine(playwright_page, device)
+            except:
+                logger.error("Failed to re-acquire tab.")
+                return False
+
+        state = detect_dev_state(playwright_page)
+        logger.info(f"👨‍💻 Developer Flow State: {state}")
+        
+        if state == "success":
+            logger.success("✅ Developer Registration successful!")
+            session.update_flag("dev_registration", True)
+            return True
             
-            logger.warning("🔒 [ACTION REQUIRED] Amazon Developer Registration requires 2-Step Verification (QR Code)!")
-            print("\n" + "!"*60)
-            print("!!! 2-STEP VERIFICATION REQUIRED - PLEASE SCAN QR CODE !!!")
-            print("!!! AFTER ENROLLING, COMPLETE THE VERIFICATION IN THE BROWSER !!!")
-            print("!"*60 + "\n")
+        elif state == "unknown":
+            logger.info(f"Navigating to: {REGISTRATION_URL}")
+            try:
+                playwright_page.goto(REGISTRATION_URL, wait_until="domcontentloaded", timeout=30000)
+            except Exception as e:
+                logger.error(f"Navigation failed: {e}")
+            time.sleep(3)
             
-            # Wait for user
-            max_wait = 600 # 10 minutes
-            start_time = time.time()
-            while time.time() - start_time < max_wait:
+        elif state == "2fa_prompt":
+            logger.warning("🔒 2-Step Verification required. Please scan QR manually.")
+            # We pause and wait for user, or until URL changes
+            for _ in range(60): # 10 minutes max
+                if playwright_page.is_closed(): return False
+                curr_state = detect_dev_state(playwright_page)
+                if curr_state != "2fa_prompt":
+                    break
                 time.sleep(10)
-                # Check if we moved past this page
-                if not page.locator("text='Enroll a 2-Step Verification authenticator'").first.is_visible(timeout=1000):
-                    logger.success("✓ 2-Step Verification completed manually")
-                    return True
+
+        elif state == "address_clarification":
+            logger.info("📍 Handling Address Clarification...")
+            # Try to just click 'Use this address' if it exists
+            # Or navigate away to registration if stuck
+            success = interaction.smart_click(
+                "Use suggested address",
+                selectors=["input[name='useSelectedAddress']", "#useSelectedAddress", "button:has-text('Use this address')"],
+                agentql_query="{ use_suggested_address_button }",
+                cache_key="dev_reg_address_clarify"
+            )
+            if not success:
+                logger.warning("Could not clear address clarification. Forcing navigation...")
+                playwright_page.goto(REGISTRATION_URL)
+            time.sleep(3)
+                
+        elif state == "registration_form":
+            logger.info("📋 Discovering registration form elements...")
             
-            logger.error("❌ 2-Step Verification timed out")
-            return False
-    except:
-        pass
-    return True
+            # Discovery Keys & Query Mapping
+            discovery_map = {
+                "country_input": "dev_reg_country_input",
+                "customer_facing_business_name": "dev_reg_business_name",
+                "address_line_1": "dev_reg_address_line1",
+                "city_input": "dev_reg_city",
+                "postal_code_zip_code": "dev_reg_zip",
+                "state_province": "dev_reg_state",
+                "same_as_primary_email_address_checkbox": "dev_reg_same_as_cb",
+                "phone_number_code_input": "dev_reg_phone_prefix",
+                "phone_number_input": "dev_reg_phone_num"
+            }
+            
+            # 1. Try to load from Cache first
+            form_elements = {}
+            needs_discovery = False
+            
+            for attr, cache_key in discovery_map.items():
+                xpath = get_cached_xpath(cache_key)
+                if xpath:
+                    loc = playwright_page.locator(f"xpath={xpath}").first
+                    if _safe_is_visible(loc, timeout=1000):
+                        form_elements[attr] = loc
+                    else:
+                        needs_discovery = True # Cache out of date or element moved
+                else:
+                    needs_discovery = True
+            
+            # 2. Sequential Discovery fallback via SINGLE AgentQL Query
+            if needs_discovery:
+                logger.info("📡 Cache incomplete. Performing single AgentQL discovery query...")
+                discovery_query = """
+                {
+                    country_input,
+                    customer_facing_business_name,
+                    address_line_1,
+                    city_input,
+                    postal_code_zip_code,
+                    state_province,
+                    same_as_primary_email_address_checkbox_label,
+                    phone_number_code_input,
+                    phone_number_input
+                }
+                """
+                try:
+                    aql_page = agentql.wrap(playwright_page)
+                    response = aql_page.query_elements(discovery_query)
+                    
+                    # Process and Cache all results
+                    for attr, cache_key in discovery_map.items():
+                        element = getattr(response, attr, None)
+                        if element:
+                            form_elements[attr] = element
+                            extract_and_cache_xpath(element, cache_key)
+                except Exception as e:
+                    logger.error(f"AgentQL discovery failed: {e}")
+
+            # Define helper to get element safely
+            def get_el(name): return form_elements.get(name)
+
+            def safe_fill(name, value, fallback_selector=None):
+                """Fills a field with retry logic for React detachment."""
+                if not value: return False
+                logger.info(f"Filling {name}...")
+                
+                # Check cache/form_elements first
+                el = get_el(name)
+                
+                # Try three times to handle detachment
+                for attempt in range(3):
+                    try:
+                        target = el
+                        if attempt > 0 or not target:
+                            # Re-query if stale or first attempt failed
+                            if fallback_selector:
+                                target = playwright_page.locator(fallback_selector).first
+                            else:
+                                # If no fallback selector, and el is None or stale, we can't fill
+                                continue
+                        
+                        if target and _safe_is_visible(target, timeout=2000):
+                            target.fill("")
+                            target.fill(str(value))
+                            time.sleep(0.1) # Small delay after fill
+                            return True
+                    except Exception as e:
+                        if attempt == 2:
+                            logger.warning(f"Failed to fill {name} after retries: {e}")
+                        time.sleep(0.5)
+                return False
+
+            def click_first_dropdown_option(page, target_val=None, priority_selectors=None):
+                """Helper to click the first visible option in a React-style dropdown."""
+                time.sleep(1.5) # Wait for dropdown animation
+                
+                # Use provided priority selectors first, then generic fallbacks
+                search_selectors = (priority_selectors or []) + [
+                    "div[role='option']", 
+                    "li[role='option']",
+                    ".sc-caSCKo .sc-eqIVtm",
+                    "xpath=//*[contains(@class, 'flinDQ')]//div",
+                    "[class*='MenuList'] div",
+                    "[class*='option']"
+                ]
+                
+                for sel in search_selectors:
+                    try:
+                        locators = page.locator(sel)
+                        count = locators.count()
+                        if count == 0: continue
+                        
+                        # Gather all visible matching options
+                        candidates = []
+                        for i in range(count):
+                            opt = locators.nth(i)
+                            if _safe_is_visible(opt, timeout=300):
+                                text = opt.inner_text().strip()
+                                
+                                # Scoring: 
+                                # exact match = 100
+                                # starts with + space/opener = 80
+                                # contains = 50
+                                score = 0
+                                if not target_val:
+                                    score = 1
+                                else:
+                                    t_lower = target_val.lower()
+                                    text_lower = text.lower()
+                                    if text_lower == t_lower: score = 100
+                                    elif text_lower.startswith(t_lower + " ("): score = 90
+                                    elif text_lower.startswith(t_lower + " "): score = 80
+                                    elif t_lower in text_lower: score = 50
+                                
+                                if score > 0:
+                                    candidates.append((score, opt, text))
+                        
+                        # Sort by score descending and take the first one
+                        if candidates:
+                            candidates.sort(key=lambda x: x[0], reverse=True)
+                            best_score, best_opt, best_text = candidates[0]
+                            
+                            logger.info(f"✓ Found best option: '{best_text}' (score: {best_score}, selector: {sel[:30]}). Clicking...")
+                            
+                            best_opt.evaluate("""el => {
+                                el.scrollIntoView();
+                                const events = ['mousedown', 'click', 'mouseup'];
+                                events.forEach(name => {
+                                    el.dispatchEvent(new MouseEvent(name, {
+                                        bubbles: true,
+                                        cancelable: true,
+                                        view: window
+                                    }));
+                                });
+                            }""")
+                            return True
+                    except Exception:
+                        continue
+                return False
+
+            # 3. Country Selection (React Styled Dropdown)
+            logger.info(f"Filling Country: {identity.country}...")
+            try:
+                country_input = get_el("country_input")
+                
+                if country_input:
+                    logger.info("⚡ Using JS click for country input...")
+                    try:
+                        # Use JS click to avoid Playwright hang
+                        playwright_page.evaluate("el => el.click()", country_input)
+                    except:
+                        playwright_page.evaluate("document.querySelector('#country_code')?.focus()")
+                    
+                    time.sleep(0.3)
+                    
+                    try:
+                        # Force focus and type
+                        country_input.focus()
+                        country_input.fill("") 
+                        country_input.type(identity.country, delay=35)
+                    except:
+                        playwright_page.keyboard.type(identity.country, delay=35)
+                    
+                    country_priority = [
+                        "xpath=/html/body/div/div[2]/div/div/div[2]/div[2]/div[3]/div/div[3]/div/div/div[2]/div/div[1]/div[1]",
+                        "xpath=//*[@id='root']/div/div[2]/div[2]/div[3]/div/div[3]/div/div/div[2]/div/div[1]/div[1]"
+                    ]
+                    if not click_first_dropdown_option(playwright_page, identity.country, priority_selectors=country_priority):
+                        logger.warning("Could not find country in dropdown, pushing Enter...")
+                        playwright_page.keyboard.press("ArrowDown")
+                        playwright_page.keyboard.press("Enter")
+                time.sleep(1)
+            except Exception as e:
+                logger.warning(f"Error selecting country: {e}")
+            
+            # 4. Text Fields with fallbacks
+            safe_fill("customer_facing_business_name", identity.full_name, "#company_name")
+            safe_fill("address_line_1", identity.address_line1, "#address_line")
+            safe_fill("city_input", identity.city, "#city")
+            safe_fill("postal_code_zip_code", identity.zip_code, "#postal_code")
+            safe_fill("state_province", identity.state, "#state_province")
+            
+            # 5. Checkbox
+            cb = get_el("same_as_primary_email_address_checkbox_label")
+            try:
+                if cb:
+                    logger.info("Clicking 'Same as primary' checkbox (Robust JS)...")
+                    cb.evaluate("""el => {
+                        const events = ['mousedown', 'click', 'mouseup'];
+                        events.forEach(name => el.dispatchEvent(new MouseEvent(name, {bubbles: true, cancelable: true, view: window})));
+                    }""")
+                    time.sleep(1)
+                else:
+                    logger.info("Falling back to standard label selector for checkbox...")
+                    playwright_page.evaluate("""() => { 
+                        const el = Array.from(document.querySelectorAll('label')).find(l => l.innerText.includes('Same as')); 
+                        if(el) {
+                           const events = ['mousedown', 'click', 'mouseup'];
+                           events.forEach(name => el.dispatchEvent(new MouseEvent(name, {bubbles: true, cancelable: true, view: window})));
+                        }
+                    }""")
+                    time.sleep(1)
+            except Exception as e:
+                logger.warning(f"Failed to click checkbox: {e}")
+            
+            # 6. Phone Prefix Dropdown
+            try:
+                country_abbrev = getattr(identity, 'country_code', 'AU') # Default to AU for this case
+                phone_prefix_input = get_el("phone_number_code_input")
+                
+                if phone_prefix_input:
+                    logger.info("⚡ Using JS click to open phone prefix...")
+                    phone_prefix_input.evaluate("el => el.click()")
+                    time.sleep(0.5)
+                    
+                    try:
+                        phone_prefix_input.focus()
+                        phone_prefix_input.fill("")
+                        phone_prefix_input.type(country_abbrev, delay=40)
+                    except:
+                        playwright_page.keyboard.type(country_abbrev, delay=40)
+                        
+                    phone_priority = [
+                        "xpath=//*[@id='root']/div/div[2]/div[4]/div[7]/div/div[3]/div/div[1]/div[2]/div/div[1]/div[1]"
+                    ]
+                    if not click_first_dropdown_option(playwright_page, country_abbrev, priority_selectors=phone_priority):
+                        logger.warning("Could not find phone prefix option in dropdown, using Enter...")
+                        playwright_page.keyboard.press("ArrowDown")
+                        playwright_page.keyboard.press("Enter")
+                    else:
+                        logger.info(f"✓ Phone prefix selected: {country_abbrev}")
+                            
+            except Exception as e:
+                logger.error(f"Phone prefix error: {e}")
+            
+            # 7. Phone Number
+            num_el = get_el("phone_number_input")
+            if num_el:
+                try:
+                    logger.info(f"Filling Phone Number: {identity.phone}")
+                    num_el.fill(identity.phone)
+                except Exception as e:
+                    logger.warning(f"Failed to fill phone: {e}")
+                
+            # 8. Submit
+            logger.info("🚀 Submitting Developer Registration...")
+            
+            # User Request: Force click the button from the first try
+            # We prioritize direct Playwright force behavior over JS click for this specific step
+            force_selectors = [
+                 "xpath=//*[@id='registrationSubmit']",
+                 "#registrationSubmit",
+                 "button:has-text('Agree and Continue')",
+                 "button:has-text('Submit')"
+            ]
+            
+            success = False
+            for sel in force_selectors:
+                try:
+                    btn = playwright_page.locator(sel).first
+                    if _safe_is_visible(btn, timeout=1000):
+                        logger.info(f"⚡ Trigerring submission via {sel} (Composite JS)...")
+                        # 1. Direct JS Click
+                        btn.evaluate("el => el.click()")
+                        # 2. Multi-event dispatch (React)
+                        btn.evaluate("""el => {
+                            const events = ['mousedown', 'click', 'mouseup', 'pointerdown', 'pointerup'];
+                            events.forEach(name => {
+                                el.dispatchEvent(new (name.startsWith('pointer') ? PointerEvent : MouseEvent)(name, {
+                                    bubbles: true,
+                                    cancelable: true,
+                                    view: window,
+                                    buttons: 1
+                                }));
+                            });
+                        }""")
+                        # 3. Direct Playwright Force Click (Fallback for persistent overlays)
+                        try:
+                            btn.click(force=True, timeout=1500)
+                        except: pass
+                        time.sleep(1)
+                        success = True
+                        break
+                except Exception:
+                    continue
+
+            if not success:
+                # Fallback to the high-powered Interaction Engine with Cache and AgentQL Fallback
+                success = interaction.smart_click(
+                    "Submit Registration",
+                    selectors=[
+                        "#registrationSubmit", 
+                        "xpath=//*[@id='registrationSubmit']",
+                        "button:has-text('Agree and Continue')",
+                        "button:has-text('Submit')"
+                    ],
+                    agentql_query="{ submit_btn }",
+                    cache_key="dev_registration_submit",
+                    biomechanical=True
+                )
+            
+            if not success:
+                logger.error("❌ Final submission failed after all waterfall attempts.")
+            
+            # Monitoring for transition
+            logger.info("⏳ Waiting for registration to process...")
+            
+            # Check for immediate validation errors
+            time.sleep(2)
+            error_locator = playwright_page.locator("[class*='error'], .errorMessage, [role='alert']").first
+            if _safe_is_visible(error_locator, timeout=500):
+                logger.error(f"❌ Form validation error detected: {error_locator.inner_text()}")
+            
+            try:
+                # Explicit wait for URL to change away from registration
+                playwright_page.wait_for_url(lambda u: "/registration" not in u.split('?')[0] or "/idv/" in u, timeout=15000)
+                logger.info("📡 Page transitioned successfully.")
+            except:
+                logger.warning("Timed out waiting for URL transition, checking for persistent buttons...")
+                # If button is STILL there and visible, maybe it wasn't clicked?
+                btn = playwright_page.locator("xpath=//*[@id='registrationSubmit']").first
+                if _safe_is_visible(btn, timeout=1000):
+                    logger.info("🖱️ Submit button still visible, attempting final forceful click...")
+                    try: btn.click(force=True, timeout=1000)
+                    except: pass
+            
+            for _ in range(10):
+                time.sleep(1)
+                new_state = detect_dev_state(playwright_page)
+                if new_state != "registration_form":
+                    logger.info(f"Transition Detected: {new_state}")
+                    break
+
+    return session.completion_flags["dev_registration"]
