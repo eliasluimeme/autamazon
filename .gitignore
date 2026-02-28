@@ -30,6 +30,9 @@ TODO
 ehthumbs.db
 Thumbs.db
 
+# Documentation
+*.md
+
 # Files
 AGENTQL_BESTPRACTICES.md
 AGENTQL_LOGIN.md

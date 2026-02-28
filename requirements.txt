@@ -11,3 +11,6 @@ Faker
 pyotp
 filelock
 psutil
+PhotoshopAPI
+psd-tools
+Pillow

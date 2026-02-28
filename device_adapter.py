@@ -330,8 +330,9 @@ class DeviceAdapter:
 
     def js_click(self, element, description: str = "element") -> bool:
         """
-        Perform a JavaScript click on the element.
-        This is often more reliable than standard clicks for stubborn elements.
+        Perform a JavaScript click on the element with maximum force.
+        Dispatches multiple events (mousedown, click, mouseup) to bypass
+        stubborn event listeners and overlaps.
         
         Args:
             element: Playwright locator
@@ -345,14 +346,40 @@ class DeviceAdapter:
                 logger.error("Page closed. Cannot JS click.")
                 return False
             
-            logger.info(f"⚡ Executing JS click on {description}...")
+            logger.info(f"⚡ Executing FORCE JS click on {description}...")
             
-            # Ensure element is resolved
-            if not element.count():
-                element.wait_for(state="attached", timeout=5000)
+            # Ensure element is resolved and visible if possible before clicking
+            try:
+                if not element.count():
+                    element.wait_for(state="attached", timeout=5000)
                 
-            element.evaluate("el => el.click()")
+                # Scrolling can help JS click even though it's not strictly required
+                element.scroll_into_view_if_needed()
+            except:
+                pass
+                
+            # Execute multiple click events for maximum reliability
+            # Some sites listen for mousedown/mouseup instead of click
+            element.evaluate("""el => {
+                const events = ['mousedown', 'click', 'mouseup'];
+                events.forEach(evt => {
+                    el.dispatchEvent(new MouseEvent(evt, {
+                        view: window,
+                        bubbles: true,
+                        cancelable: true,
+                        buttons: 1
+                    }));
+                });
+                // Also trigger the native JS click just in case
+                if (typeof el.click === 'function') el.click();
+            }""")
+            
             return True
         except Exception as e:
-            logger.warning(f"JS click failed for {description}: {e}")
-            return False
+            logger.warning(f"Force JS click failed for {description}: {e}. Trying native force click...")
+            try:
+                # Ultimate fallback
+                element.click(force=True, timeout=3000)
+                return True
+            except:
+                return False

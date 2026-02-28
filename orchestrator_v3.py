@@ -110,7 +110,7 @@ from utils.cleanup import kill_zombie_processes
 _profile_log_handlers = {}
 
 
-def _setup_profile_logging(profile_id: str) -> int:
+def _setup_profile_logging(profile_id: str, attempt: int = 1) -> int:
     """Add a dedicated log file for this profile."""
     log_file = f"logs/{profile_id}.log"
     handler_id = logger.add(
@@ -118,7 +118,7 @@ def _setup_profile_logging(profile_id: str) -> int:
         level="DEBUG",
         filter=_make_profile_filter(profile_id),
         format="{time:HH:mm:ss.SSS} | {level: <8} | {module}:{function}:{line} | {message}",
-        mode="w",  # Fresh file each run
+        mode="w" if attempt == 1 else "a",  # Fresh file on first run, append on retries
     )
     _profile_log_handlers[profile_id] = handler_id
     return handler_id
@@ -139,6 +139,7 @@ def run_profile_pipeline(
     profile_id: str,
     lifecycle: ProfileLifecycleManager,
     identity_pool: IdentityPool,
+    attempt: int = 1,
 ) -> bool:
     """
     Execute the full automation pipeline for a single profile.
@@ -147,11 +148,14 @@ def run_profile_pipeline(
     (opsec_workflow, interaction, device_adapter, etc.) are tagged
     and routed to the correct profile log file — not the terminal.
     """
-    _setup_profile_logging(profile_id)
+    _setup_profile_logging(profile_id, attempt=attempt)
     
     # contextualize() tags every log record from this thread with profile_id
     # This is what makes the terminal filter work for ALL downstream modules
     with logger.contextualize(profile_id=profile_id):
+        if attempt > 1:
+            logger.info(f"🔄 --- RETRY ATTEMPT {attempt} ---")
+        
         profile = lifecycle.register_profile(profile_id)
         
         def _check_shutdown():
@@ -437,6 +441,7 @@ def _cleanup_profile(profile: ManagedProfile, manager, identity_pool: IdentityPo
         if manager:
             profile.transition_to(ProfileState.STOPPING, "Shutting down browser")
             manager.stop_browser()
+            profile.browser_manager = None  # Ensure it's cleared for retry
         
         # Release identity
         identity_pool.release(
@@ -453,12 +458,53 @@ def _cleanup_profile(profile: ManagedProfile, manager, identity_pool: IdentityPo
         logger.warning(f"Cleanup error for {profile.profile_id}: {e}")
 
 
+def run_profile_with_retry(
+    profile_id: str,
+    lifecycle: ProfileLifecycleManager,
+    identity_pool: IdentityPool,
+    max_retries: int = 3
+) -> bool:
+    """
+    Wrapper for run_profile_pipeline that handles retries.
+    """
+    for attempt_idx in range(max_retries):
+        attempt = attempt_idx + 1
+        
+        # Stagger retries to avoid hammering services
+        if attempt > 1:
+            wait_time = random.uniform(5, 10)
+            logger.info(f"⏳ Waiting {wait_time:.1f}s before retry {attempt}/{max_retries} for {profile_id}...")
+            time.sleep(wait_time)
+            
+            # Increment retry count in metrics if already registered
+            profile = lifecycle.get_profile(profile_id)
+            if profile:
+                profile.metrics.retry_count += 1
+        
+        success = run_profile_pipeline(profile_id, lifecycle, identity_pool, attempt=attempt)
+        
+        if success:
+            return True
+            
+        if shutdown_event.is_set():
+            logger.warning(f"Aborting retries for {profile_id} due to shutdown")
+            break
+            
+        if attempt < max_retries:
+            logger.warning(f"❌ Attempt {attempt} failed for {profile_id}. Queueing retry...")
+        else:
+            logger.error(f"❌ All {max_retries} attempts failed for {profile_id}")
+            
+    return False
+
+
 def main():
     parser = argparse.ArgumentParser(description="Amazon V3 Orchestrator")
     parser.add_argument("--profiles", nargs="+", required=True, help="List of Profile IDs")
     parser.add_argument("--concurrency", type=int, default=3, help="Max concurrent profiles")
     parser.add_argument("--pool-size", type=int, default=5, help="Identity pre-generation pool size")
     parser.add_argument("--country", type=str, default="US", help="Country code for identity generation")
+    parser.add_argument("--max-retries", type=int, default=3, help="Max retries per profile (default: 3)")
     
     args = parser.parse_args()
     
@@ -557,10 +603,11 @@ def main():
                 time.sleep(stagger_wait)
                 
             future = executor.submit(
-                run_profile_pipeline,
+                run_profile_with_retry,
                 pid,
                 lifecycle,
                 identity_pool,
+                max_retries=args.max_retries
             )
             futures_map[future] = pid
         
