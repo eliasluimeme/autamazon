@@ -107,6 +107,17 @@ SEL_BACK_CONFIRM_CONTINUE = [
     'input.a-button-input[type="submit"]',
 ]
 
+# Try Again button — shown on the "we couldn't verify" failure page
+SEL_TRY_AGAIN = [
+    'button:has-text("Try again")',
+    'button:has-text("Try Again")',
+    'a:has-text("Try again")',
+    'a:has-text("Try Again")',
+    '[data-action="ivv-try-again"] button',
+    '[data-action="ivv-try-again"] a',
+    'input.a-button-input[value*="Try"]',
+]
+
 # ─── AgentQL fallback queries (used only when CSS selectors fail) ─────────────
 IDV_AQL = {
     "landing_page":       '{ verify_identity_button }',
@@ -251,6 +262,15 @@ def detect_idv_state(page) -> str:
     url = page.url.lower()
 
     # 1. SUCCESS ─────────────────────────────────────────────────────────────
+    # Primary: exact banner text shown on the developer console after IDV completes
+    if _safe_is_visible(page.get_by_text("Identity Verified Successfully", exact=False), timeout=400):
+        return "success"
+    # Also treat the developer console settings page post-verification as success
+    # (URL lands there after the green banner is acknowledged)
+    if "developer.amazon.com" in url and "idv" not in url and \
+       _safe_is_visible(page.get_by_text("You can now continue to upload and test your apps", exact=False), timeout=300):
+        return "success"
+
     success_texts = [
         "document has been submitted",
         "identity verification submitted",
@@ -267,9 +287,35 @@ def detect_idv_state(page) -> str:
         if _safe_is_visible(page.get_by_text(txt, exact=False), timeout=300):
             return "success"
 
-    # 2. REJECTED ────────────────────────────────────────────────────────────
-    # amazon.com/idverify/document/status with a failure message
-    # Checked BEFORE processing so a status page with an error isn't mis-detected.
+    # 2. IDV FAILED — "We couldn't verify your ID" page with a Try Again button
+    # URL: amazon.com/idverify/document/status (same path as processing but with error UI)
+    idv_failed_texts = [
+        "we couldn't verify your id",
+        "we could not verify your id",
+        "couldn't verify your id",
+        "we're having trouble verifying your identity",
+        "we are having trouble verifying your identity",
+        "having trouble verifying",
+        "we couldn't verify your identity",
+        "we could not verify your identity",
+        "couldn't verify your identity",
+        "could not verify your identity",
+    ]
+    for txt in idv_failed_texts:
+        if _safe_is_visible(page.get_by_text(txt, exact=False), timeout=300):
+            return "idv_failed"
+    # URL-based detection: status page + Try Again button visible = failed (not processing)
+    if "idverify/document/status" in url:
+        for sel in ['button:has-text("Try again")', 'button:has-text("Try Again")', 'a:has-text("Try again")']:
+            try:
+                if page.locator(sel).count() > 0:
+                    return "idv_failed"
+            except Exception:
+                pass
+
+    # 3. REJECTED ────────────────────────────────────────────────────────────
+    # amazon.com/idverify/document/status with a hard failure message
+    # (no retry offered — Amazon will not accept this document)
     rejection_texts = [
         "name on your id doesn't match",
         "name on your id does not match",
@@ -796,8 +842,10 @@ def run_identity_verification(playwright_page, session: SessionState, device) ->
 
         # ── SUCCESS ───────────────────────────────────────────────────────────
         if state == "success":
-            logger.success("✅ Identity Verification submitted successfully!")
+            logger.success("✅ Identity Verified Successfully — automation complete!")
             session.update_flag("idv_submitted", True)
+            session.update_flag("idv_verified", True)
+            session.set_status("IDV_SUCCESS")
             return True
 
         # ── REJECTED — Amazon rejected the document on idverify status page ──
@@ -810,6 +858,43 @@ def run_identity_verification(playwright_page, session: SessionState, device) ->
             session.set_metadata("idv_failure_reason", reason)
             session.set_status("IDV_REJECTED")
             return False
+
+        # ── IDV FAILED — "We couldn't verify your identity" with Try Again button ─
+        elif state == "idv_failed":
+            logger.warning("⚠️  Amazon could not verify identity — attempting 'Try Again'…")
+            clicked = False
+            for sel in SEL_TRY_AGAIN:
+                try:
+                    loc = playwright_page.locator(sel).first
+                    if loc.count() == 0:
+                        continue
+                    try:
+                        loc.scroll_into_view_if_needed(timeout=2000)
+                    except Exception:
+                        pass
+                    if _js_composite_click(playwright_page, loc, f"Try Again ({sel[:40]})"):
+                        logger.success(f"✅ Clicked 'Try Again' via: {sel[:60]}")
+                        clicked = True
+                        break
+                except Exception as e:
+                    logger.debug(f"Try Again selector failed '{sel[:50]}': {e}")
+                    continue
+            if not clicked:
+                # AgentQL semantic fallback
+                logger.info("AgentQL fallback for Try Again button…")
+                ok = interaction.smart_click(
+                    "Try Again",
+                    selectors=SEL_TRY_AGAIN,
+                    agentql_query="{ try_again_button }",
+                    cache_key="idv_try_again",
+                    biomechanical=True,
+                )
+                if not ok:
+                    logger.error("❌ Could not click 'Try Again' — aborting IDV")
+                    session.set_status("IDV_FAILED")
+                    return False
+            _wait_for_page_stable(playwright_page)
+            time.sleep(2)
 
         # ── CONSOLE FAILED — developer console banner: "Account Identity
         # Verification Failed." — Amazon has already processed and rejected us.
