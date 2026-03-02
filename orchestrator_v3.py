@@ -894,6 +894,12 @@ def main():
     # ──────────────────────────────────────────────────
     # STEP 5: Execute with thread pool
     # ──────────────────────────────────────────────────
+    # All profiles are submitted immediately so the executor can queue them.
+    # Stagger is applied inside each worker right before it actually starts,
+    # ensuring proper gaps without blocking the main submission loop.
+    # This guarantees that as soon as a running profile finishes, the next
+    # queued profile starts without any delay introduced by the main thread.
+    # ──────────────────────────────────────────────────
     logger.info(
         f"🌟 Starting V3 Orchestrator: {len(profile_ids)} profiles, "
         f"concurrency={args.concurrency}, pool_size={args.pool_size}"
@@ -901,31 +907,43 @@ def main():
     
     results = {}
     start_time = time.time()
-    
+
+    # Shared stagger state: workers serialize through this lock to ensure
+    # a minimum gap between actual browser launches.
+    _stagger_lock = threading.Lock()
+    _last_launch_time: list[float] = [0.0]
+    _first_launch: list[bool] = [True]
+
+    def _run_staggered(pid: str) -> bool:
+        """Worker wrapper: apply per-launch stagger then run pipeline with retry."""
+        with _stagger_lock:
+            if _first_launch[0]:
+                _first_launch[0] = False
+            else:
+                gap = random.uniform(2, 5)
+                elapsed = time.time() - _last_launch_time[0]
+                wait = max(0.0, gap - elapsed)
+                if wait > 0:
+                    logger.info(f"⏳ Staggering: waiting {wait:.1f}s before starting {pid}...")
+                    time.sleep(wait)
+            _last_launch_time[0] = time.time()
+
+        return run_profile_with_retry(
+            pid,
+            lifecycle,
+            identity_pool,
+            max_retries=args.max_retries,
+            skip_outlook_signup=args.skip_outlook_signup,
+            email_pool=email_pool,
+        )
+
     with ThreadPoolExecutor(
         max_workers=args.concurrency,
         thread_name_prefix="worker"
     ) as executor:
-        futures_map = {}
-        for pid in profile_ids:
-            # ──────────────────────────────────────────────
-            # STAGGERED LAUNCH to avoid AdsPower rate limits
-            # ──────────────────────────────────────────────
-            if len(profile_ids) > 1 and pid != profile_ids[0]:
-                stagger_wait = random.uniform(2, 5)
-                logger.info(f"⏳ Staggering: waiting {stagger_wait:.1f}s before starting {pid}...")
-                time.sleep(stagger_wait)
-                
-            future = executor.submit(
-                run_profile_with_retry,
-                pid,
-                lifecycle,
-                identity_pool,
-                max_retries=args.max_retries,
-                skip_outlook_signup=args.skip_outlook_signup,
-                email_pool=email_pool,
-            )
-            futures_map[future] = pid
+        # Submit ALL profiles upfront — the executor automatically queues
+        # any beyond max_workers and starts them as slots free up.
+        futures_map = {executor.submit(_run_staggered, pid): pid for pid in profile_ids}
         
         for future in as_completed(futures_map):
             pid = futures_map[future]

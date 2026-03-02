@@ -303,6 +303,7 @@ class DLFactory:
                 target = matches[index]
                 active_replacement_map[field] = {
                     "pos": (target["bbox"][0], target["bbox"][1]),
+                    "right": target["bbox"][2],  # right edge for right-alignment
                     "size": target["bbox"][3] - target["bbox"][1] # height
                 }
                 logger.debug(f"Matched field '{field}' to layer text '{placeholder}' (index {index}) at {target['bbox'][0]},{target['bbox'][1]}")
@@ -541,23 +542,30 @@ class DLFactory:
                     for ch in txt:
                         draw.text((cx, cy), ch, font=f_obj, fill=fill_clr, stroke_width=s_w, stroke_fill=s_f)
                         cx += f_obj.getlength(ch) + tracking
-            
+
+            # Right-alignment: shift draw_x so text ends at the placeholder's right edge
+            if f_cfg.get("right_align") and "right" in data:
+                text_width = font.getlength(text)
+                draw_x = int(data["right"] - text_width)
+            else:
+                draw_x = p_pos[0]
+
             # Shadow
             if "shadow" in f_cfg:
                 sx, sy = f_cfg["shadow"].get("offset", (2, 2))
                 sfill_raw = f_cfg["shadow"].get("fill", (0, 0, 0, 200))
                 sfill = tuple(sfill_raw) if isinstance(sfill_raw, list) else sfill_raw
-                _draw(p_pos[0] + sx, p_pos[1] + sy, text, font, sfill)
+                _draw(draw_x + sx, p_pos[1] + sy, text, font, sfill)
             
             # Emboss effect (Metallic text)
             if f_cfg.get("emboss"):
                 # Black outline
                 for ox, oy in [(0, -1), (0, 1), (-1, 0), (1, 0)]:
-                    _draw(p_pos[0] + ox, p_pos[1] + oy, text, font, (0, 0, 0, 200))
+                    _draw(draw_x + ox, p_pos[1] + oy, text, font, (0, 0, 0, 200))
                 # Top-left white highlight
-                _draw(p_pos[0] - 1, p_pos[1] - 1, text, font, (255, 255, 255, 255))
+                _draw(draw_x - 1, p_pos[1] - 1, text, font, (255, 255, 255, 255))
             
-            _draw(p_pos[0], p_pos[1], text, font, fill, sw, sf)
+            _draw(draw_x, p_pos[1], text, font, fill, sw, sf)
 
         # 3. Fallback for fields NOT discovered via layer map (e.g., photo/signature secondary text)
         for field, f_cfg in cfg.get("fields", {}).items():
@@ -581,6 +589,14 @@ class DLFactory:
         if name == "license_num" and key not in identity:
             last = identity.get("last_name", "DOE")[:5].upper().ljust(5, '9')
             y2 = identity.get("dob_year", "1990")[-2:]; m = identity.get("dob_month", "01"); d = identity.get("dob_day", "01")
+            country = identity.get("country", "GB").upper()
+            if country in ("AU", "AUSTRALIA"):
+                # Victorian DL format: SURNAME5 + YYMMDD + check_letter + 2 digits
+                CHECK_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ"  # no I/O to avoid misread
+                idx = (ord(last[0]) + int(y2) + int(m) + int(d)) % len(CHECK_CHARS)
+                check = CHECK_CHARS[idx]
+                seq = str((int(y2) + int(m)) % 90 + 1).zfill(2)
+                return f"{last}{y2}{m}{d}{check}{seq}"
             return f"{last}{y2}{m}{d}X99XX"
         return str(identity.get(key, info.get("default", ""))).upper() if info.get("case","upper") == "upper" else str(identity.get(key, info.get("default", "")))
 

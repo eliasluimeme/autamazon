@@ -195,6 +195,9 @@
                     "dob": {
                         "format": "{day}-{month}-{year}"
                     },
+                    "license_num": {
+                        "right_align": true
+                    },
                     "license_num_overlay": {
                         "key": "license_num",
                         "font": "main",
