@@ -105,9 +105,84 @@ from core.profile_lifecycle import (
     ManagedProfile
 )
 from utils.cleanup import kill_zombie_processes
+from modules.adspower import AdsPowerProfileManager
+from modules.proxy import get_proxy_config
 
 # Track per-profile log handler IDs for cleanup
 _profile_log_handlers = {}
+
+
+class EmailPool:
+    """
+    Thread-safe pool of pre-existing Outlook email credentials.
+
+    Reads from a file formatted as one ``email:password`` per line.
+    Lines already prefixed with ``#USED:`` are skipped.
+    When an email is acquired it is immediately rewritten with the
+    ``#USED:`` prefix so no other worker can claim the same address.
+    """
+
+    def __init__(self, emails_file: str = "emails/emails.txt"):
+        self.emails_file = emails_file
+        self._lock = threading.Lock()
+
+    def acquire(self) -> dict | None:
+        """
+        Pop one unused email credential from the file.
+
+        The line is atomically rewritten as ``#USED:<original>`` before
+        returning so concurrent workers never see the same address.
+
+        Returns:
+            dict with keys ``email`` and ``password``, or ``None`` when
+            the pool is exhausted.
+        """
+        with self._lock:
+            try:
+                with open(self.emails_file, "r") as f:
+                    lines = f.readlines()
+            except FileNotFoundError:
+                logger.error(f"Emails file not found: {self.emails_file}")
+                return None
+
+            for i, line in enumerate(lines):
+                stripped = line.strip()
+                # Skip blank lines, comments, and already-consumed entries
+                if not stripped or stripped.startswith("#"):
+                    continue
+
+                parts = stripped.split(":", 1)
+                if len(parts) != 2:
+                    logger.warning(f"Skipping malformed email line: {stripped}")
+                    continue
+
+                email, password = parts[0].strip(), parts[1].strip()
+
+                # Mark consumed before returning
+                lines[i] = f"#USED:{stripped}\n"
+                try:
+                    with open(self.emails_file, "w") as f:
+                        f.writelines(lines)
+                except Exception as e:
+                    logger.error(f"Failed to mark email as used: {e}")
+                    return None
+
+                logger.info(f"📧 Acquired email from pool: {email}")
+                return {"email": email, "password": password}
+
+            logger.error("❌ Email pool exhausted — no unused emails remaining!")
+            return None
+
+    def available_count(self) -> int:
+        """Return the number of unused emails still in the file."""
+        try:
+            with open(self.emails_file, "r") as f:
+                return sum(
+                    1 for line in f
+                    if line.strip() and not line.strip().startswith("#") and ":" in line
+                )
+        except FileNotFoundError:
+            return 0
 
 
 def _setup_profile_logging(profile_id: str, attempt: int = 1) -> int:
@@ -140,13 +215,21 @@ def run_profile_pipeline(
     lifecycle: ProfileLifecycleManager,
     identity_pool: IdentityPool,
     attempt: int = 1,
+    skip_outlook_signup: bool = False,
+    email_pool: "EmailPool | None" = None,
 ) -> bool:
     """
     Execute the full automation pipeline for a single profile.
-    
+
     Uses logger.contextualize(profile_id=X) so ALL downstream logs
     (opsec_workflow, interaction, device_adapter, etc.) are tagged
     and routed to the correct profile log file — not the terminal.
+
+    Args:
+        skip_outlook_signup: When True the Outlook *signup* flow is
+            skipped and an existing credential from ``email_pool`` is
+            used to sign in instead.
+        email_pool: Required when ``skip_outlook_signup`` is True.
     """
     _setup_profile_logging(profile_id, attempt=attempt)
     
@@ -233,18 +316,38 @@ def run_profile_pipeline(
             profile.transition_to(ProfileState.WORKING, "Starting automation")
             
             session = SessionState(profile_id)
-            session.load()
             
             device = profile.device
             
             # --- Outlook Setup ---
             if not session.identity and not session.completion_flags.get("outlook_created", False):
                 logger.info("📬 Phase: Outlook Setup")
-                
-                generated_identity, new_page = _run_outlook_with_preloaded_identity(
-                    manager, playwright_page, device, identity
-                )
-                
+
+                if skip_outlook_signup:
+                    # ── Sign-in path: consume a pre-existing email credential ──
+                    logger.info("📧 skip-outlook-signup=True — using existing email credential")
+                    if email_pool is None:
+                        logger.error("email_pool is required when skip_outlook_signup=True")
+                        _cleanup_profile(profile, manager, identity_pool, success=False)
+                        return False
+
+                    email_data = email_pool.acquire()
+                    if not email_data:
+                        logger.error("Email pool exhausted — cannot proceed without an Outlook account")
+                        profile.transition_to(ProfileState.ERROR, "Email pool exhausted")
+                        _cleanup_profile(profile, manager, identity_pool, success=False)
+                        return False
+
+                    generated_identity, new_page = _run_outlook_login_with_email(
+                        manager, playwright_page, device, email_data,
+                        country_code=identity_pool.country_code,
+                    )
+                else:
+                    # ── Default path: sign-up with pre-warmed identity ──
+                    generated_identity, new_page = _run_outlook_with_preloaded_identity(
+                        manager, playwright_page, device, identity
+                    )
+
                 if generated_identity and new_page:
                     session.update_identity(generated_identity)
                     session.update_flag("outlook_created", True)
@@ -321,7 +424,23 @@ def run_profile_pipeline(
                     logger.error("2FA failed")
                     _cleanup_profile(profile, manager, identity_pool, success=False)
                     return False
-            
+
+            if _check_shutdown():
+                _cleanup_profile(profile, manager, identity_pool, success=False)
+                return False
+
+            # --- Identity Verification (IDV) ---
+            if not session.completion_flags.get("idv_submitted", False):
+                logger.info("🪪 Phase: Identity Verification")
+                playwright_page = device.page
+                from amazon.actions.identity_verification import run_identity_verification
+                if run_identity_verification(playwright_page, session, device):
+                    logger.success("Identity Verification submitted")
+                else:
+                    logger.error("Identity Verification failed")
+                    _cleanup_profile(profile, manager, identity_pool, success=False)
+                    return False
+
             # ──────────────────────────────────────────────
             # PHASE 3: Success
             # ──────────────────────────────────────────────
@@ -344,6 +463,120 @@ def run_profile_pipeline(
             
         finally:
             _teardown_profile_logging(profile_id)
+
+
+def _run_outlook_login_with_email(manager, page, device, email_data: dict, country_code: str = "AU"):
+    """
+    Run Outlook *sign-in* with an existing ``email:password`` credential.
+
+    After a successful login a **full** identity is generated via
+    ``IdentityGenerator`` (proper name, address, DOB) and the pool email
+    and password are injected into it.  This ensures downstream stages
+    (Amazon signup, developer registration, IDV) receive realistic person
+    data instead of using the email address as a name.
+
+    Args:
+        manager:      OpSecBrowserManager
+        page:         Current Playwright page
+        device:       DeviceAdapter
+        email_data:   Dict with keys ``email`` and ``password``
+        country_code: Country for identity generation (default ``"AU"``).
+
+    Returns:
+        Tuple of ``(Identity, page)`` on success, or ``(None, None)``.
+    """
+    import time as _time
+    from amazon.identity_manager import Identity
+
+    email = email_data.get("email", "")
+    password = email_data.get("password", "")
+    logger.info(f"📧 Starting Outlook Login for: {email}")
+
+    # Switch to a fresh tab
+    try:
+        new_page = manager.context.new_page()
+        if page and not page.is_closed():
+            page.close()
+        page = new_page
+        device.page = page
+    except Exception as e:
+        logger.warning(f"Could not recycle tab for Outlook login: {e}")
+
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        logger.info(f"📧 Outlook Login Attempt {attempt + 1}/{max_attempts}")
+        try:
+            if page.is_closed():
+                page = manager.context.new_page()
+                device.page = page
+
+            from amazon.outlook_login.run import run_outlook_login
+            outlook_data = run_outlook_login(page, device, email_data)
+
+            if outlook_data == "RETRY":
+                logger.warning(f"🔄 Outlook login signaled RETRY (Attempt {attempt + 1})")
+                if attempt < max_attempts - 1:
+                    _time.sleep(2)
+                    continue
+                return None, None
+
+            if outlook_data and isinstance(outlook_data, dict):
+                logger.success(f"✓ Outlook login successful: {email}")
+
+                # Generate a full, realistic identity then inject the pool email.
+                try:
+                    from modules.identity_generator import IdentityGenerator
+                    ig = IdentityGenerator()
+                    base = ig.generate_identity(country_code)
+                    firstname = base["first_name"]
+                    lastname = base["last_name"]
+                    address = base.get("address", "")
+                    city = base.get("city", "")
+                    zip_code = base.get("zip", "")
+                    state = base.get("state", "")
+                    country_name_map = {
+                        "US": "United States", "AU": "Australia", "GB": "United Kingdom",
+                        "CA": "Canada", "DE": "Germany", "FR": "France", "IT": "Italy",
+                    }
+                    country_full = country_name_map.get(country_code.upper(), country_code)
+                    logger.info(
+                        f"🆔 Generated identity for signin: {firstname} {lastname} "
+                        f"({city}, {country_full})"
+                    )
+                except Exception as gen_err:
+                    logger.warning(f"Identity generation failed, falling back to email handle: {gen_err}")
+                    email_handle = email.split("@")[0]
+                    firstname, lastname = email_handle, ""
+                    address, city, zip_code, state, country_full = "", "", "", "", country_code
+
+                generated_identity = Identity(
+                    firstname=firstname,
+                    lastname=lastname,
+                    email=email,
+                    password=password,
+                    address_line1=address,
+                    city=city,
+                    zip_code=zip_code,
+                    state=state,
+                    country=country_full,
+                )
+                final_page = manager.context.new_page()
+                page.close()
+                return generated_identity, final_page
+            else:
+                logger.error("Outlook login returned no data")
+                if attempt < max_attempts - 1:
+                    continue
+                return None, None
+
+        except Exception as e:
+            logger.error(f"Outlook login attempt {attempt + 1} raised: {e}")
+            if attempt < max_attempts - 1:
+                _time.sleep(2)
+                continue
+            return None, None
+
+    return None, None
 
 
 def _run_outlook_with_preloaded_identity(manager, page, device, identity: PooledIdentity):
@@ -462,52 +695,133 @@ def run_profile_with_retry(
     profile_id: str,
     lifecycle: ProfileLifecycleManager,
     identity_pool: IdentityPool,
-    max_retries: int = 3
+    max_retries: int = 3,
+    skip_outlook_signup: bool = False,
+    email_pool: "EmailPool | None" = None,
 ) -> bool:
     """
     Wrapper for run_profile_pipeline that handles retries.
     """
     for attempt_idx in range(max_retries):
         attempt = attempt_idx + 1
-        
+
         # Stagger retries to avoid hammering services
         if attempt > 1:
             wait_time = random.uniform(5, 10)
             logger.info(f"⏳ Waiting {wait_time:.1f}s before retry {attempt}/{max_retries} for {profile_id}...")
             time.sleep(wait_time)
-            
+
             # Increment retry count in metrics if already registered
             profile = lifecycle.get_profile(profile_id)
             if profile:
                 profile.metrics.retry_count += 1
-        
-        success = run_profile_pipeline(profile_id, lifecycle, identity_pool, attempt=attempt)
-        
+
+        success = run_profile_pipeline(
+            profile_id, lifecycle, identity_pool,
+            attempt=attempt,
+            skip_outlook_signup=skip_outlook_signup,
+            email_pool=email_pool,
+        )
+
         if success:
             return True
-            
+
         if shutdown_event.is_set():
             logger.warning(f"Aborting retries for {profile_id} due to shutdown")
             break
-            
+
         if attempt < max_retries:
             logger.warning(f"❌ Attempt {attempt} failed for {profile_id}. Queueing retry...")
         else:
             logger.error(f"❌ All {max_retries} attempts failed for {profile_id}")
-            
+
     return False
 
 
 def main():
     parser = argparse.ArgumentParser(description="Amazon V3 Orchestrator")
-    parser.add_argument("--profiles", nargs="+", required=True, help="List of Profile IDs")
+    parser.add_argument("--profiles", nargs="+", help="List of Profile IDs")
+    parser.add_argument("--accounts", type=int, help="Number of profiles to create if --profiles is missing")
+    parser.add_argument("--os", type=str, default="windows", choices=["windows", "mac", "android", "ios"], help="OS for new profiles")
     parser.add_argument("--concurrency", type=int, default=3, help="Max concurrent profiles")
     parser.add_argument("--pool-size", type=int, default=5, help="Identity pre-generation pool size")
-    parser.add_argument("--country", type=str, default="US", help="Country code for identity generation")
+    parser.add_argument("--country", type=str, default="US", help="Country code for identity generation and proxy")
     parser.add_argument("--max-retries", type=int, default=3, help="Max retries per profile (default: 3)")
-    
+    parser.add_argument(
+        "--skip-outlook-signup",
+        action="store_true",
+        default=False,
+        help=(
+            "Skip Outlook account creation and sign in with a pre-existing "
+            "credential from --emails-file instead. Each email is marked as "
+            "#USED: in the file after it is consumed."
+        ),
+    )
+    parser.add_argument(
+        "--emails-file",
+        type=str,
+        default="emails/emails.txt",
+        help="Path to the email credentials file used when --skip-outlook-signup is set (default: emails/emails.txt)",
+    )
+
     args = parser.parse_args()
+
+    # ──────────────────────────────────────────────────
+    # STEP 0: Resolve Profiles (Create if needed)
+    # ──────────────────────────────────────────────────
+    profile_ids = args.profiles or []
     
+    if not profile_ids:
+        if not args.accounts:
+            logger.error("❌ Either --profiles or --accounts must be specified.")
+            sys.exit(1)
+        
+        logger.info(f"🆕 No profiles specified. Creating {args.accounts} new profiles...")
+        manager = AdsPowerProfileManager()
+        
+        os_type = args.os
+        
+        for i in range(args.accounts):
+            name = f"Auto_{os_type.capitalize()}_{int(time.time())}_{i+1}"
+            proxy_config = get_proxy_config(country=args.country.lower())
+            
+            pid = manager.create_profile_v2(
+                name=name,
+                os_type=os_type,
+                proxy_config=proxy_config
+            )
+            
+            if pid:
+                profile_ids.append(pid)
+                # Small delay to avoid API rate limits
+                if i < args.accounts - 1:
+                    time.sleep(1)
+            else:
+                logger.error(f"Failed to create profile {i+1}")
+        
+        if not profile_ids:
+            logger.error("❌ Failed to create any profiles. Exiting.")
+            sys.exit(1)
+        
+        logger.success(f"✅ Created {len(profile_ids)} profiles: {', '.join(profile_ids)}")
+    
+    # ──────────────────────────────────────────────────
+    # STEP 0b: Initialise email pool (if signin mode)
+    # ──────────────────────────────────────────────────
+    email_pool = None
+    if args.skip_outlook_signup:
+        email_pool = EmailPool(emails_file=args.emails_file)
+        available = email_pool.available_count()
+        if available == 0:
+            logger.error(
+                f"❌ --skip-outlook-signup requested but no unused emails "
+                f"found in {args.emails_file}. Add credentials or remove #USED: prefixes."
+            )
+            sys.exit(1)
+        logger.info(
+            f"📧 Outlook signin mode: {available} unused email(s) available in {args.emails_file}"
+        )
+
     # ──────────────────────────────────────────────────
     # STEP 1: Initial cleanup
     # ──────────────────────────────────────────────────
@@ -518,14 +832,14 @@ def main():
     # --------------------------------------------------
     # Optimization: Don't over-generate identities if we only have a few profiles.
     # We want enough to cover concurrency plus a small buffer for instantaneous retries.
-    calculated_pool_size = min(args.pool_size, len(args.profiles) + 1)
+    calculated_pool_size = min(args.pool_size, len(profile_ids) + 1)
     
     identity_pool = IdentityPool(
         pool_size=calculated_pool_size, 
         country_code=args.country
     )
     # Generate enough identities for all profiles BEFORE any browser starts
-    identity_pool.warm_up(count=len(args.profiles))
+    identity_pool.warm_up(count=len(profile_ids))
     identity_pool.start_background_generation()
     
     # ──────────────────────────────────────────────────
@@ -534,7 +848,7 @@ def main():
     lifecycle = ProfileLifecycleManager(max_concurrent=args.concurrency)
     
     # Register all profiles
-    for pid in args.profiles:
+    for pid in profile_ids:
         lifecycle.register_profile(pid)
     
     # ──────────────────────────────────────────────────
@@ -581,7 +895,7 @@ def main():
     # STEP 5: Execute with thread pool
     # ──────────────────────────────────────────────────
     logger.info(
-        f"🌟 Starting V3 Orchestrator: {len(args.profiles)} profiles, "
+        f"🌟 Starting V3 Orchestrator: {len(profile_ids)} profiles, "
         f"concurrency={args.concurrency}, pool_size={args.pool_size}"
     )
     
@@ -593,11 +907,11 @@ def main():
         thread_name_prefix="worker"
     ) as executor:
         futures_map = {}
-        for pid in args.profiles:
+        for pid in profile_ids:
             # ──────────────────────────────────────────────
             # STAGGERED LAUNCH to avoid AdsPower rate limits
             # ──────────────────────────────────────────────
-            if len(args.profiles) > 1 and pid != args.profiles[0]:
+            if len(profile_ids) > 1 and pid != profile_ids[0]:
                 stagger_wait = random.uniform(2, 5)
                 logger.info(f"⏳ Staggering: waiting {stagger_wait:.1f}s before starting {pid}...")
                 time.sleep(stagger_wait)
@@ -607,7 +921,9 @@ def main():
                 pid,
                 lifecycle,
                 identity_pool,
-                max_retries=args.max_retries
+                max_retries=args.max_retries,
+                skip_outlook_signup=args.skip_outlook_signup,
+                email_pool=email_pool,
             )
             futures_map[future] = pid
         

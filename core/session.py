@@ -25,9 +25,11 @@ class SessionState:
             "product_selected": False,
             "amazon_signup": False,
             "dev_registration": False,
-            "2fa_enabled": False
+            "2fa_enabled": False,
+            "idv_submitted": False
         }
         self.identity: Identity | None = None
+        self.metadata: dict = {}   # arbitrary key-value store (e.g. failure reasons)
         
         # Initialize
         self.load()
@@ -62,6 +64,7 @@ class SessionState:
                         phone=identity_data.get("phone", "399304444"),
                         two_fa_secret=identity_data.get("two_fa_secret")
                     )
+                self.metadata = data.get("metadata", {})
                 logger.info(f"Loaded existing session state for {self.profile_id}")
             except Exception as e:
                 logger.error(f"Failed to load session state for {self.profile_id}: {e}")
@@ -81,7 +84,8 @@ class SessionState:
             "status": self.status,
             "platform": self.platform,
             "completion_flags": self.completion_flags,
-            "identity": ident_dict
+            "identity": ident_dict,
+            "metadata": self.metadata
         }
         
         try:
@@ -105,6 +109,12 @@ class SessionState:
     def update_identity(self, identity: Identity):
         self.identity = identity
         self.save()
+
+    def set_metadata(self, key: str, value):
+        """Store arbitrary metadata (e.g. failure reasons) and persist."""
+        self.metadata[key] = value
+        self.save()
+        logger.info(f"Session metadata set: {key} = {value}")
 
     def set_status(self, status: str):
         self.status = status

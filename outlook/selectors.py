@@ -32,9 +32,9 @@ SELECTORS = {
     # Date of birth step
     # Microsoft uses custom dropdown buttons, not native <select> elements
     "dob": {
-        "month_select": "#BirthMonth, select[name='BirthMonth'], select[aria-label='Month'], [aria-label='Month'], button[aria-label*='Month'], div[aria-haspopup][id*='Month'], [data-testid='BirthMonth'], [id*='BirthMonth']",
-        "day_select": "#BirthDay, select[name='BirthDay'], select[aria-label='Day'], [aria-label='Day'], button[aria-label*='Day'], div[aria-haspopup][id*='Day'], [data-testid='BirthDay'], [id*='BirthDay']",
-        "year_input": "#BirthYear, input[name='BirthYear'], input[placeholder='Year'], input[id*='Year'], input[aria-label*='year'], input[aria-label*='Year'], [data-testid='BirthYear']",
+        "month_select": "#BirthMonthDropdown, [id='BirthMonthDropdown'], [name='BirthMonth'], [aria-label='Birth month'], select[name='BirthMonth'], select[aria-label='Month'], [aria-label='Month'], button[aria-label*='Month'], div[aria-haspopup][id*='Month'], [data-testid='BirthMonth'], [id*='BirthMonth']",
+        "day_select": "#BirthDayDropdown, [id='BirthDayDropdown'], [name='BirthDay'], [aria-label='Birth day'], select[name='BirthDay'], select[aria-label='Day'], [aria-label='Day'], button[aria-label*='Day'], div[aria-haspopup][id*='Day'], [data-testid='BirthDay'], [id*='BirthDay']",
+        "year_input": "#BirthYear, [id='BirthYear'], input[name='BirthYear'], #floatingLabelInput23, input[placeholder='Year'], input[id*='Year'], input[aria-label*='year'], input[aria-label*='Year'], [data-testid='BirthYear']",
         "country_select": "#Country, select[name='Country'], select[id*='Country'], [aria-label='Country'], button[aria-label*='Country']",
         "next_button": "#iSignupAction, button[type='submit'], #idSIButton9, button[id*='Signup'], button[id*='Next'], button:has-text('Next')",
     },

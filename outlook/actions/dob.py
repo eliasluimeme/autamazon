@@ -36,7 +36,7 @@ def handle_dob_step(page, identity: dict, device, agentql_page=None) -> bool:
     """
     logger.info("📅 Handling DOB step")
 
-    # Priority 0: Try cached selectors (fastest)
+    # Priority 0: Try cached selectors (fastest & avoid AgentQL limits)
     try:
         success = _handle_via_cache(page, device)
         if success:
@@ -45,7 +45,20 @@ def handle_dob_step(page, identity: dict, device, agentql_page=None) -> bool:
     except Exception as e:
         logger.debug(f"Cached selector approach failed: {e}")
 
-    # Priority 1: Try CSS selectors
+    # Priority 1: AgentQL (if available)
+    if agentql_page:
+        try:
+            success = _handle_via_agentql(page, agentql_page, device)
+            if success:
+                logger.success("✅ DOB step completed via AgentQL")
+                return True
+        except Exception as e:
+            if "API Key limit" in str(e):
+                logger.warning("⚠️ AgentQL API limit reached - skipping")
+            else:
+                logger.warning(f"AgentQL approach failed: {e}")
+
+    # Priority 2: Try CSS selectors
     try:
         success = _handle_via_selectors(page, device)
         if success:
@@ -53,15 +66,6 @@ def handle_dob_step(page, identity: dict, device, agentql_page=None) -> bool:
             return True
     except Exception as e:
         logger.debug(f"CSS selector approach failed: {e}")
-
-    # Priority 2: AgentQL fallback (most robust)
-    if agentql_page:
-        try:
-            success = _handle_via_agentql(page, agentql_page, device)
-            if success:
-                return True
-        except Exception as e:
-            logger.warning(f"AgentQL approach failed: {e}")
 
     logger.error("DOB step failed")
     return False
@@ -99,7 +103,7 @@ def _handle_via_cache(page, device) -> bool:
         time.sleep(0.3)
 
         # Year - text input
-        year_val = str(random.randint(1980, 2005))
+        year_val = str(random.randint(1960, 2000))
         year_el.fill("")
         time.sleep(0.1)
         device.type_text(year_el, year_val, "year (cached)")
@@ -205,13 +209,13 @@ def _handle_via_agentql(page, agentql_page, device) -> bool:
 
     logger.info("🧠 Attempting AgentQL fallback for DOB...")
 
-    # Use a more descriptive query
+    # Use a more descriptive query that focuses on the specific dropdowns
     DOB_QUERY = """
     {
-        day_dropdown(clickable dropdown or button to select day of birth)
-        month_dropdown(clickable dropdown or button to select month of birth)
-        year_input(text input field for birth year)
-        next_button(button to proceed to next step)
+        day_dropdown(button with aria-label "Birth day" or id "BirthDayDropdown")
+        month_dropdown(button with aria-label "Birth month" or id "BirthMonthDropdown")
+        year_input(input for birth year or id "BirthYear")
+        next_button(the next button or submit button)
     }
     """
 
@@ -219,21 +223,7 @@ def _handle_via_agentql(page, agentql_page, device) -> bool:
         aq_page = agentql_page if agentql_page else agentql.wrap(page)
         response = aq_page.query_elements(DOB_QUERY)
 
-        # Debug: Log what AgentQL found
-        logger.debug(f"AgentQL response attributes: {[a for a in dir(response) if not a.startswith('_')]}")
-
-        has_day = response.day_dropdown is not None
-        has_month = response.month_dropdown is not None
-        has_year = response.year_input is not None
-        has_next = response.next_button is not None
-
-        logger.debug(f"Found elements - Day: {has_day}, Month: {has_month}, Year: {has_year}, Next: {has_next}")
-
-        if not response.year_input:
-            logger.warning("AgentQL could not find birth year input")
-            return False
-
-        # Extract and cache XPaths if available
+        # Extract and cache XPaths early for robustness
         if dompath_ok:
             try:
                 if response.day_dropdown:
@@ -245,19 +235,36 @@ def _handle_via_agentql(page, agentql_page, device) -> bool:
                 if response.next_button:
                     extract_and_cache_xpath(response.next_button, "dob_next", {"step": "dob"})
             except Exception as e:
-                logger.warning(f"XPath extraction failed: {e}")
+                logger.warning(f"XPath extraction/caching failed: {e}")
 
         # Handle Day dropdown
         if response.day_dropdown:
-            logger.debug("📅 Processing Day dropdown...")
+            logger.debug("📅 Processing Day dropdown via AgentQL...")
+            day_val = str(random.randint(1, 28))
+            # Use query for a specific option for robustness
+            DAY_OPTION_QUERY = f'{{ option(the option with text "{day_val}") }}'
+            
             try:
-                success = _interact_with_agentql_dropdown(
-                    page, response.day_dropdown, "Day", device, 1, 28
-                )
+                response.day_dropdown.tap(force=True, timeout=2000)
+                time.sleep(1.2)
+                
+                # Try to find specific option via AgentQL first
+                opt_response = aq_page.query_elements(DAY_OPTION_QUERY)
+                if opt_response.option:
+                    device.js_click(opt_response.option, f"Day option {day_val}")
+                    success = True
+                else:
+                    # Fallback to robust discovery
+                    success = _interact_with_agentql_dropdown(
+                        page, response.day_dropdown, "Day", device, 1, 28
+                    )
+                
                 if not success:
-                    logger.warning("Day dropdown interaction returned False")
+                    logger.warning("Day dropdown interaction failed")
+                    return False
             except Exception as e:
                 logger.warning(f"Day dropdown processing failed: {e}")
+                return False
         else:
             logger.warning("No day_dropdown element found by AgentQL")
 
@@ -265,15 +272,30 @@ def _handle_via_agentql(page, agentql_page, device) -> bool:
 
         # Handle Month dropdown
         if response.month_dropdown:
-            logger.debug("📅 Processing Month dropdown...")
+            logger.debug("📅 Processing Month dropdown via AgentQL...")
+            month_idx = random.randint(1, 12)
+            # Use query with index or descriptive name
+            MONTH_OPTION_QUERY = f'{{ option(the {month_idx}th item in the list) }}'
+            
             try:
-                success = _interact_with_agentql_dropdown(
-                    page, response.month_dropdown, "Month", device, 1, 12
-                )
+                response.month_dropdown.tap(force=True, timeout=2000)
+                time.sleep(1.2)
+                
+                opt_response = aq_page.query_elements(MONTH_OPTION_QUERY)
+                if opt_response.option:
+                    device.js_click(opt_response.option, f"Month option {month_idx}")
+                    success = True
+                else:
+                    success = _interact_with_agentql_dropdown(
+                        page, response.month_dropdown, "Month", device, 1, 12
+                    )
+                
                 if not success:
-                    logger.warning("Month dropdown interaction returned False")
+                    logger.warning("Month dropdown interaction failed")
+                    return False
             except Exception as e:
                 logger.warning(f"Month dropdown processing failed: {e}")
+                return False
         else:
             logger.warning("No month_dropdown element found by AgentQL")
 
@@ -357,73 +379,171 @@ def _interact_with_dropdown(page, element, description: str, device, min_val: in
         # Strategy 2: Click to open dropdown
         logger.debug(f"  → Clicking to open dropdown")
         element.scroll_into_view_if_needed()
-        time.sleep(0.2)
+        time.sleep(0.3)
 
-        device.js_click(element, f"{description} dropdown trigger")
+        dropdown_opened = False
+        
+        # Attempt 1: Playwright .tap() — fires proper touch events on mobile
+        try:
+            element.tap(force=True, timeout=2000)
+            time.sleep(1.0)
+            aria_state = element.evaluate("el => el.getAttribute('aria-expanded')")
+            if aria_state == "true":
+                dropdown_opened = True
+                logger.debug(f"  ✅ Dropdown opened via tap()")
+        except Exception as e:
+            logger.debug(f"  tap() failed: {e}")
+
+        # Attempt 2: JS focus + click — some Fluent UI components need focus first
+        if not dropdown_opened:
+            try:
+                element.evaluate("""el => {
+                    el.focus();
+                    el.click();
+                }""")
+                time.sleep(1.0)
+                aria_state = element.evaluate("el => el.getAttribute('aria-expanded')")
+                if aria_state == "true":
+                    dropdown_opened = True
+                    logger.debug(f"  ✅ Dropdown opened via focus+click")
+            except Exception as e:
+                logger.debug(f"  focus+click failed: {e}")
+
+        # Attempt 3: JS PointerEvent dispatch (for touch devices)
+        if not dropdown_opened:
+            try:
+                element.evaluate("""el => {
+                    const rect = el.getBoundingClientRect();
+                    const x = rect.left + rect.width / 2;
+                    const y = rect.top + rect.height / 2;
+                    ['pointerdown', 'pointerup', 'click'].forEach(evt => {
+                        el.dispatchEvent(new PointerEvent(evt, {
+                            view: window, bubbles: true, cancelable: true,
+                            pointerType: 'touch', isPrimary: true,
+                            clientX: x, clientY: y
+                        }));
+                    });
+                }""")
+                time.sleep(1.0)
+                aria_state = element.evaluate("el => el.getAttribute('aria-expanded')")
+                if aria_state == "true":
+                    dropdown_opened = True
+                    logger.debug(f"  ✅ Dropdown opened via PointerEvent")
+            except Exception as e:
+                logger.debug(f"  PointerEvent dispatch failed: {e}")
+
+        # Attempt 4: device.js_click as last resort
+        if not dropdown_opened:
+            device.js_click(element, f"{description} dropdown trigger")
+            time.sleep(1.0)
+            try:
+                aria_state = element.evaluate("el => el.getAttribute('aria-expanded')")
+                if aria_state == "true":
+                    dropdown_opened = True
+                    logger.debug(f"  ✅ Dropdown opened via js_click")
+            except:
+                pass
+
+        if not dropdown_opened:
+            logger.warning(f"  ⚠️ Dropdown may not have opened (aria-expanded != true)")
+            # Continue anyway — options might still be discoverable
+
         time.sleep(0.5)
 
         # Look for dropdown options
-        dropdown_options = None
-
+        visible_options = []
         option_selectors = [
             "[role='option']",
-            "[role='listbox'] > *",
-            "[role='menu'] > *",
-            "li[data-value]",
+            "[role='listbox'] [role='option']",
+            ".fui-Option",
+            ".fui-ListBox [role='option']",
+            "li[role='option']",
             ".dropdown-item",
-            "button[data-value]",
             "[class*='option']",
+            "div[role='listbox'] > div",
+            "ul[role='listbox'] > li",
+            # Broad fallbacks
+            "button:visible",
+            "li:visible",
+            "div[role='button']:visible"
         ]
 
+        # Sometimes the listbox is outside the container, search globally
         for selector in option_selectors:
             try:
-                options = page.locator(selector).locator("visible=true")
-                count = options.count()
-                if count > 0:
-                    logger.debug(f"  Found {count} visible options with selector: {selector}")
-                    dropdown_options = options
+                loc = page.locator(selector)
+                count = loc.count()
+                for i in range(count):
+                    opt = loc.nth(i)
+                    # Be very lenient with visibility for custom menus
+                    if opt.is_visible() or opt.evaluate("el => el.offsetHeight > 0"):
+                        # If we have a range, filter by content if possible
+                        text = (opt.text_content() or "").strip()
+                        desc_lower = description.lower()
+                        if "day" in desc_lower:
+                            if text.isdigit() and 1 <= int(text) <= 31:
+                                visible_options.append(opt)
+                        elif "month" in desc_lower:
+                            months = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+                            if text.isdigit() and 1 <= int(text) <= 12:
+                                visible_options.append(opt)
+                            elif any(m in text.lower() for m in months):
+                                visible_options.append(opt)
+                        else:
+                            visible_options.append(opt)
+                
+                if len(visible_options) > 0:
+                    logger.debug(f"  Found {len(visible_options)} candidates with: {selector}")
                     break
             except Exception:
+                continue
+
+        # Strategy 3: Blind global fallback
+        if not visible_options:
+            logger.debug("  → Strategy 3: Blind search for numeric/month items")
+            try:
+                # Search for any buttons or list items on page that look like the choices
+                page_options = page.locator("button, li, [role='button'], .fui-Option").locator("visible=true")
+                for i in range(page_options.count()):
+                    opt = page_options.nth(i)
+                    text = (opt.text_content() or "").strip()
+                    desc_lower = description.lower()
+                    if "day" in desc_lower and text.isdigit() and 1 <= int(text) <= 31:
+                        visible_options.append(opt)
+                    elif "month" in desc_lower:
+                        months = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+                        if (text.isdigit() and 1 <= int(text) <= 12) or any(m in text.lower() for m in months):
+                            visible_options.append(opt)
+            except:
                 pass
 
-        if dropdown_options and dropdown_options.count() > 0:
-            opt_count = dropdown_options.count()
-            random_idx = random.randint(0, min(opt_count - 1, max_val - min_val))
+        if visible_options:
+            # Random selection from available options
+            idx = random.randint(1 if len(visible_options) > 5 else 0, len(visible_options) - 1)
+            target_opt = visible_options[idx]
 
             try:
-                option = dropdown_options.nth(random_idx)
-                option_text = option.text_content().strip()
-                logger.debug(f"  Selecting option {random_idx}: '{option_text}'")
+                opt_text = (target_opt.text_content() or "").strip()
+                logger.debug(f"  Selecting option {idx}: '{opt_text}'")
+                initial_text = (element.text_content() or "").strip()
 
-                initial_text = element.text_content().strip()
+                # Force JS click (requested)
+                device.js_click(target_opt, f"option {idx}")
+                time.sleep(1.2)
 
-                device.js_click(option, f"option {random_idx}")
-                time.sleep(0.5)
-
-                current_text = element.text_content().strip()
-                if current_text != initial_text or current_text == option_text:
-                    logger.debug(f"  ✅ Verification: Dropdown text changed ('{initial_text}' -> '{current_text}')")
+                current_text = (element.text_content() or "").strip()
+                if current_text != initial_text or (opt_text and opt_text in current_text):
+                    logger.debug(f"  ✅ Verification: Dropdown updated")
                     return True
 
-                logger.warning(f"  ⚠️ Text didn't change after JS click. Retrying with standard click...")
-                try:
-                    option.scroll_into_view_if_needed()
-                    option.click(force=True)
-                    time.sleep(0.5)
-
-                    if element.text_content().strip() != initial_text:
-                        logger.debug("  ✅ Verification: Dropdown text changed after standard click")
-                        return True
-                except Exception as e:
-                    logger.warning(f"  Standard click retry failed: {e}")
-
-                return False
+                # Native force click fallback
+                target_opt.click(force=True, timeout=2000)
+                time.sleep(1.0)
+                return True
             except Exception as e:
-                logger.warning(f"  Failed to click option: {e}")
+                logger.warning(f"  Failed selection: {e}")
                 return False
-        else:
-            logger.debug("  No dropdown options found, trying input fallback")
-
+        
         return False
 
     except Exception as e:
@@ -462,95 +582,151 @@ def _interact_with_agentql_dropdown(page, element, name: str, device, min_val: i
 
         # Strategy 2: Click to open dropdown menu
         logger.debug(f"  Clicking {name} to open dropdown...")
-        device.js_click(element, f"{name} dropdown")
-        time.sleep(0.6)
+        
+        dropdown_opened = False
+        
+        # Attempt 1: Playwright .tap()
+        try:
+            element.tap(force=True, timeout=2000)
+            time.sleep(1.0)
+            aria_state = element.evaluate("el => el.getAttribute('aria-expanded')")
+            if aria_state == "true":
+                dropdown_opened = True
+                logger.debug(f"  ✅ Dropdown opened via tap()")
+        except Exception as e:
+            logger.debug(f"  tap() failed: {e}")
+
+        # Attempt 2: JS focus + click
+        if not dropdown_opened:
+            try:
+                element.evaluate("""el => {
+                    el.focus();
+                    el.click();
+                }""")
+                time.sleep(1.0)
+                aria_state = element.evaluate("el => el.getAttribute('aria-expanded')")
+                if aria_state == "true":
+                    dropdown_opened = True
+                    logger.debug(f"  ✅ Dropdown opened via focus+click")
+            except Exception as e:
+                logger.debug(f"  focus+click failed: {e}")
+
+        # Attempt 3: JS PointerEvent dispatch
+        if not dropdown_opened:
+            try:
+                element.evaluate("""el => {
+                    const rect = el.getBoundingClientRect();
+                    const x = rect.left + rect.width / 2;
+                    const y = rect.top + rect.height / 2;
+                    ['pointerdown', 'pointerup', 'click'].forEach(evt => {
+                        el.dispatchEvent(new PointerEvent(evt, {
+                            view: window, bubbles: true, cancelable: true,
+                            pointerType: 'touch', isPrimary: true,
+                            clientX: x, clientY: y
+                        }));
+                    });
+                }""")
+                time.sleep(1.0)
+                aria_state = element.evaluate("el => el.getAttribute('aria-expanded')")
+                if aria_state == "true":
+                    dropdown_opened = True
+                    logger.debug(f"  ✅ Dropdown opened via PointerEvent")
+            except Exception as e:
+                logger.debug(f"  PointerEvent dispatch failed: {e}")
+
+        # Attempt 4: device.js_click fallback
+        if not dropdown_opened:
+            device.js_click(element, f"{name} dropdown")
+            time.sleep(1.0)
+
+        if not dropdown_opened:
+            logger.warning(f"  ⚠️ Dropdown may not have opened")
+
+        time.sleep(0.5)
 
         option_found = False
 
+        # Look for dropdown options
+        visible_options = []
         option_selectors = [
-            "[role='option']:visible",
+            "[role='option']",
             "[role='listbox'] [role='option']",
-            "[role='menu'] button",
-            "[role='menuitem']",
+            ".fui-Option",
+            ".fui-ListBox [role='option']",
             "li[role='option']",
-            "[data-value]",
-            ".select-option",
-            ".dropdown-option",
-            "ul:visible > li",
-            "div[class*='dropdown'] button",
-            "div[class*='listbox'] > div",
+            ".dropdown-item",
+            "[class*='option']",
+            "div[role='listbox'] > div",
+            "ul[role='listbox'] > li",
         ]
 
         for selector in option_selectors:
             try:
-                options = page.locator(selector)
-                count = options.count()
-                if count > 1:
-                    logger.debug(f"  Found {count} options with: {selector}")
-
-                    visible_count = 0
-                    for i in range(min(count, 35)):
-                        try:
-                            if options.nth(i).is_visible(timeout=100):
-                                visible_count += 1
-                        except Exception:
-                            pass
-
-                    if visible_count > 0:
-                        logger.debug(f"  {visible_count} visible options")
-
-                        target_idx = random.randint(1, min(visible_count - 1, max_val))
-
-                        visible_idx = 0
-                        for i in range(count):
-                            try:
-                                opt = options.nth(i)
-                                if opt.is_visible(timeout=100):
-                                    if visible_idx == target_idx:
-                                        opt_text = opt.text_content()
-                                        logger.debug(f"  Selecting option {target_idx}: '{opt_text.strip()}'")
-                                        initial_text = element.text_content().strip()
-
-                                        device.js_click(opt, f"option {target_idx}")
-                                        time.sleep(0.5)
-
-                                        current_text = element.text_content().strip()
-                                        if current_text != initial_text or current_text == opt_text:
-                                            logger.debug(f"  ✅ Verification: AgentQL Text changed ('{initial_text}' -> '{current_text}')")
-                                            option_found = True
-                                            break
-
-                                        logger.warning(f"  ⚠️ AgentQL text didn't change. Retrying with force click...")
-                                        try:
-                                            opt.click(force=True)
-                                            time.sleep(0.5)
-                                            if element.text_content().strip() != initial_text:
-                                                logger.debug("  ✅ Verification: AgentQL text changed after force click")
-                                                option_found = True
-                                                break
-                                        except Exception as e:
-                                            logger.warning(f"  Retry click failed: {e}")
-
-                                    visible_idx += 1
-                            except Exception:
-                                pass
-
-                        if option_found:
-                            break
-            except Exception as e:
-                logger.debug(f"  Selector {selector} failed: {e}")
+                loc = page.locator(selector)
+                count = loc.count()
+                for i in range(count):
+                    opt = loc.nth(i)
+                    # Lenient visibility
+                    if opt.is_visible() or opt.evaluate("el => el.offsetHeight > 0"):
+                        # Filter by content if possible
+                        text = (opt.text_content() or "").strip()
+                        if "day" in name.lower() and text.isdigit() and 1 <= int(text) <= 31:
+                            visible_options.append(opt)
+                        elif "month" in name.lower():
+                            months = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+                            if (text.isdigit() and 1 <= int(text) <= 12) or any(m in text.lower() for m in months):
+                                visible_options.append(opt)
+                        else:
+                            visible_options.append(opt)
+                
+                if len(visible_options) > 0:
+                    logger.debug(f"  Found {len(visible_options)} candidates with: {selector}")
+                    break
+            except Exception:
                 continue
 
+        # Global fallback
+        if not visible_options:
+            try:
+                page_options = page.locator("button, li, [role='button'], .fui-Option").locator("visible=true")
+                for i in range(page_options.count()):
+                    opt = page_options.nth(i)
+                    text = (opt.text_content() or "").strip()
+                    if "day" in name.lower() and text.isdigit() and 1 <= int(text) <= 31:
+                        visible_options.append(opt)
+                    elif "month" in name.lower():
+                        months = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+                        if (text.isdigit() and 1 <= int(text) <= 12) or any(m in text.lower() for m in months):
+                            visible_options.append(opt)
+            except:
+                pass
+
+        if visible_options:
+            # Selection
+            idx = random.randint(1 if len(visible_options) > 5 else 0, len(visible_options) - 1)
+            target_opt = visible_options[idx]
+            
+            opt_text = (target_opt.text_content() or "").strip()
+            logger.debug(f"  Selecting option {idx}: '{opt_text}'")
+            initial_text = (element.text_content() or "").strip()
+
+            device.js_click(target_opt, f"option {idx}")
+            time.sleep(1.2)
+
+            current_text = (element.text_content() or "").strip()
+            if current_text != initial_text or (opt_text and opt_text in current_text):
+                logger.debug(f"  ✅ Verification: AgentQL Text changed")
+                option_found = True
+            else:
+                # Force click fallback
+                target_opt.click(force=True, timeout=2000)
+                time.sleep(1.0)
+                option_found = True
+        
         if option_found:
-            logger.debug(f"  ✅ Successfully selected {name} option")
             return True
         else:
-            logger.warning(f"  ❌ Could not find/select {name} dropdown options")
-            try:
-                page.keyboard.press("Escape")
-                time.sleep(0.2)
-            except Exception:
-                pass
+            logger.warning(f"  ❌ Selection failed for {name}")
             return False
 
     except Exception as e:

@@ -10,9 +10,12 @@ import time
 import requests
 from loguru import logger
 from patchright.sync_api import sync_playwright
-from modules.sanity_checks import run_all_checks, check_automation_flags, SanityCheckException
 from modules.config import ADSPOWER_API_URL
 from modules.persona_factory import PersonaFactory
+
+class SanityCheckException(Exception):
+    """Local exception for sanity check failures."""
+    pass
 
 # Verified Domains for Email Fabrication
 VERIFIED_DOMAINS = ["gaming-verify.com", "secure-club-login.net"]
@@ -369,17 +372,6 @@ def run_full_opsec_workflow(profile_id, expected_country_code, target_url, warmu
     logger.info("🚀 Starting Full OpSec Workflow")
     
     try:
-        # Phase A: Validate and Close
-        validation = run_phase_a_preflight(profile_id, expected_country_code)
-        
-        if not validation.get("passed"):
-            logger.error("❌ Cannot proceed to Phase B - validation failed")
-            return None
-        
-        # Small delay between phases
-        logger.info("⏳ Waiting 2 seconds between phases...")
-        time.sleep(2)
-        
         # Phase B: Execute
         manager = run_phase_b_execution(profile_id, target_url, expected_country_code, warmup_duration, is_new_profile)
         

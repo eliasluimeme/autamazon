@@ -328,7 +328,7 @@ class DeviceAdapter:
             logger.warning(f"Hold failed for {description}: {e}")
             return False
 
-    def js_click(self, element, description: str = "element") -> bool:
+    def js_click(self, element, description: str = "element", timeout: int = 5000) -> bool:
         """
         Perform a JavaScript click on the element with maximum force.
         Dispatches multiple events (mousedown, click, mouseup) to bypass
@@ -337,6 +337,7 @@ class DeviceAdapter:
         Args:
             element: Playwright locator
             description: Description for logging
+            timeout: Max time in ms to wait for element resolution (default 5s)
             
         Returns:
             True if successful
@@ -351,7 +352,7 @@ class DeviceAdapter:
             # Ensure element is resolved and visible if possible before clicking
             try:
                 if not element.count():
-                    element.wait_for(state="attached", timeout=5000)
+                    element.wait_for(state="attached", timeout=min(timeout, 3000))
                 
                 # Scrolling can help JS click even though it's not strictly required
                 element.scroll_into_view_if_needed()
@@ -372,7 +373,7 @@ class DeviceAdapter:
                 });
                 // Also trigger the native JS click just in case
                 if (typeof el.click === 'function') el.click();
-            }""")
+            }""", timeout=timeout)
             
             return True
         except Exception as e:

@@ -84,7 +84,7 @@ def run_ebook_search_flow(playwright_page, device, session: SessionState) -> boo
             try:
                 for _ in range(2):
                     device.scroll("down", "medium")
-                    time.sleep(1)
+                    time.sleep(0.5)
             except: pass
             
             # Select random book link

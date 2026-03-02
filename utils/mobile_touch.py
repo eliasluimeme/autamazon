@@ -14,7 +14,7 @@ BASE_FINGER_ANGLE = 45.0
 ANGLE_VARIANCE = 15.0     
 
 # Typing Parameters
-KEY_PRESS_DELAY_RANGE = (0.05, 0.20) 
+KEY_PRESS_DELAY_RANGE = (0.04, 0.14) 
 MISTAKE_PROBABILITY = 0.06 
 NEIGHBORING_KEYS = {
     'q': 'wsa', 'w': 'qase', 'e': 'wsdr', 'r': 'edft', 't': 'rfgy', 'y': 'tghu', 'u': 'yhji',
@@ -250,7 +250,7 @@ def human_like_mobile_scroll(page, direction="down", magnitude="medium"):
         cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
         cdp.detach()
         
-        time.sleep(random.uniform(1.2, 2.8)) 
+        time.sleep(random.uniform(0.6, 1.4)) 
 
     except Exception as e:
         logger.error(f"Mobile Scroll Failed: {e}")
@@ -314,7 +314,7 @@ def human_like_mobile_type(locator, text):
 
 
     # Wait for keyboard animation
-    time.sleep(random.uniform(0.5, 1.0)) 
+    time.sleep(random.uniform(0.3, 0.6)) 
     
     keyboard = locator.page.keyboard
     current_layer = "alpha" # Phones default to alpha layer on focus
@@ -327,20 +327,20 @@ def human_like_mobile_type(locator, text):
             # Simulate time to find and tap the "?123" or "ABC" button
             # This is usually slower than a normal keystroke
             logger.trace(f"Switching keyboard layer: {current_layer} -> {target_layer}")
-            time.sleep(random.uniform(0.3, 0.6))
+            time.sleep(random.uniform(0.2, 0.4))
             current_layer = target_layer
             
         # === 2. Mistake Logic (Stays same) ===
         if random.random() < MISTAKE_PROBABILITY and char.lower() in NEIGHBORING_KEYS:
             mistake_char = random.choice(NEIGHBORING_KEYS[char.lower()])
             keyboard.type(mistake_char)
-            time.sleep(random.uniform(0.15, 0.4)) 
+            time.sleep(random.uniform(0.10, 0.25)) 
             keyboard.press("Backspace")
             time.sleep(random.uniform(0.1, 0.2))
             
         # === 3. Shift Key Penalty ===
         if char.isupper():
-            time.sleep(random.uniform(0.1, 0.3)) 
+            time.sleep(random.uniform(0.05, 0.15)) 
             
         # === 4. Type the Character ===
         keyboard.type(char)
@@ -348,14 +348,14 @@ def human_like_mobile_type(locator, text):
         # === 5. Dynamic Delays ===
         if char == " ":
             # Spacebar is big and easy to hit
-            time.sleep(random.uniform(0.10, 0.20))
+            time.sleep(random.uniform(0.06, 0.14))
         elif target_layer == "symbol":
             # Symbols take slightly longer to find visually
-            time.sleep(random.uniform(0.15, 0.35))
+            time.sleep(random.uniform(0.10, 0.25))
         else:
             time.sleep(random.uniform(*KEY_PRESS_DELAY_RANGE)) 
     
-    time.sleep(random.uniform(0.3, 0.7))
+    time.sleep(random.uniform(0.2, 0.5))
     # locator.press("Enter") 
     
     return True

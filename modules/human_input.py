@@ -1,7 +1,28 @@
-from utils.mouse_random_click import human_like_mouse_click, reset_mouse_state
-from utils.human_type import human_like_type
-from utils.mobile_touch import human_like_mobile_tap, human_like_mobile_scroll, human_like_mobile_type
 from loguru import logger
+import random
+import time
+
+# Try to import sophisticated utilities, fall back to None if missing
+try:
+    from utils.mouse_random_click import human_like_mouse_click, reset_mouse_state
+except ImportError:
+    logger.warning("Desktop mouse utilities not available in HumanInput")
+    human_like_mouse_click = None
+    reset_mouse_state = lambda: None
+
+try:
+    from utils.human_type import human_like_type
+except ImportError:
+    logger.warning("Human typing utilities not available in HumanInput")
+    human_like_type = None
+
+try:
+    from utils.mobile_touch import human_like_mobile_tap, human_like_mobile_scroll, human_like_mobile_type
+except ImportError:
+    logger.warning("Mobile touch utilities not available in HumanInput")
+    human_like_mobile_tap = None
+    human_like_mobile_scroll = None
+    human_like_mobile_type = None
 
 class HumanInput:
     def __init__(self, page, device_type="desktop"):
@@ -24,35 +45,43 @@ class HumanInput:
         Automatically chooses Click vs Tap based on the device type.
         """
         if self.device_type == "mobile":
-            return human_like_mobile_tap(self.page, locator)
+            if human_like_mobile_tap:
+                return human_like_mobile_tap(self.page, locator)
+            else:
+                return locator.click()
         else:
             # Use sophisticated mouse click for desktop
-            return human_like_mouse_click(locator, speed_mode="medium")
+            if human_like_mouse_click:
+                return human_like_mouse_click(locator, speed_mode="medium")
+            else:
+                return locator.click()
 
     def smart_type(self, locator, text):
         """
         Automatically chooses Keyboard vs Soft-Keyboard based on device type.
         """
         if self.device_type == "mobile":
-            return human_like_mobile_type(locator, text)
+            if human_like_mobile_type:
+                return human_like_mobile_type(locator, text)
+            else:
+                return locator.fill(text)
         else:
             # Use sophisticated typing for desktop
-            return human_like_type(locator, text, speed_mode="medium")
+            if human_like_type:
+                return human_like_type(locator, text, speed_mode="medium")
+            else:
+                return locator.fill(text)
 
     def smart_scroll(self):
         """
         Mouse Wheel vs Finger Swipe.
-        
-        Note: This is a generic scroll action. For element-specific scrolling, 
-        the desktop implementation already handles it within human_like_mouse_click.
         """
         if self.device_type == "mobile":
-            human_like_mobile_scroll(self.page, direction="down")
+            if human_like_mobile_scroll:
+                human_like_mobile_scroll(self.page, direction="down")
+            else:
+                self.page.mouse.wheel(0, 500)
         else:
-            # Simple random scroll for desktop generic behavior
-            import random
-            import time
-            
             try:
                 # Scroll down a random amount
                 scroll_amount = random.randint(300, 700)

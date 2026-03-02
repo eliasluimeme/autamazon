@@ -30,11 +30,54 @@ class AdsPowerProfileManager:
             logger.error(f"❌ Connection Failed: {e}")
             return None
 
+    def create_profile_v2(self, name, os_type="windows", group_id="0", proxy_config=None):
+        """
+        Create a profile using the recommended v2 API structure.
+        Ensures consistent UA and hardware fingerprints by letting AdsPower manage them.
+        """
+        is_mobile = os_type in ["android", "ios"]
+        device_type = "mobile" if is_mobile else "desktop"
+        
+        payload = {
+            "name": name,
+            "group_id": group_id,
+            "browser_kernel": "chromium",
+            "platform": "",
+            "fingerprint_config": {
+                "ua_auto": 1,
+                "device": device_type,
+                "os": os_type,
+                "language_switch": 1,
+                "automatic_timezone": "1",
+                "webrtc": "forward",
+                "canvas": 1,
+                "webgl": 1,
+                "audio_context": 1,
+                "client_rects": 1,
+                "fonts": ["all"],
+                "screen_resolution": "random"
+            }
+        }
+        
+        if proxy_config:
+            payload["user_proxy_config"] = proxy_config
+
+        data = self._api_request("/api/v2/browser-profile/create", payload)
+        if data:
+            logger.info(f"✅ Created Profile V2: {data['profile_id']} ({name}) on {os_type}/{device_type}")
+            return data["profile_id"]
+        return None
+
     def create_random_profile(self, name=None, group_id="0", proxy_config=None, fingerprint_config=None):
         """Step 1: Create a profile with minimal config/random OS."""
         if not name:
             name = f"Auto_Random_{int(time.time())}"
             
+        # If fingerprint_config is provided and contains 'os', try to use V2 logic
+        if fingerprint_config and "os" in fingerprint_config:
+            os_type = fingerprint_config["os"]
+            return self.create_profile_v2(name, os_type, group_id, proxy_config)
+
         payload = {
             "name": name,
             "group_id": group_id,

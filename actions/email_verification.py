@@ -63,19 +63,19 @@ def handle_email_verification(browser_context, amazon_page, device, email: str, 
     # We need the email password. Identity is not passed here, so we might need to find it.
     # For now, we assume the identity manager or session state might provide it.
     # If we don't have password, we skip to browser-based Outlook.
-    from amazon.identity_manager import find_identity_by_email
-    ident = find_identity_by_email(email)
+    # from amazon.identity_manager import find_identity_by_email
+    # ident = find_identity_by_email(email)
     
-    if ident and ident.password:
-        otp_code = get_otp_from_imap(ident.email, ident.password, timeout=60)
-        if otp_code:
-            logger.success(f"✅ OTP retrieved via IMAP: {otp_code}")
-            amazon_page.bring_to_front()
-            if _enter_otp_code(amazon_page, device, otp_code, purpose):
-                logger.success(f"✓ Email verification completed via IMAP! ({purpose})")
-                return True
+    # if ident and ident.password:
+    #     otp_code = get_otp_from_imap(ident.email, ident.password, timeout=60)
+    #     if otp_code:
+    #         logger.success(f"✅ OTP retrieved via IMAP: {otp_code}")
+    #         amazon_page.bring_to_front()
+    #         if _enter_otp_code(amazon_page, device, otp_code, purpose):
+    #             logger.success(f"✓ Email verification completed via IMAP! ({purpose})")
+    #             return True
     
-    logger.info("IMAP retrieval failed or unavailable, falling back to browser-based Outlook...")
+    # logger.info("IMAP retrieval failed or unavailable, falling back to browser-based Outlook...")
     
     # Step 1: Open Outlook in a new tab
     outlook_page = None
@@ -118,7 +118,7 @@ def handle_email_verification(browser_context, amazon_page, device, email: str, 
             otp_wait_start = time.time()
             page_refreshed = False
             while time.time() - otp_wait_start < (max_wait if attempt == 0 else 60):
-                otp_code = _wait_for_amazon_email(outlook_page, device, 10) # short poll
+                otp_code = _wait_for_amazon_email(outlook_page, device, 10, used_otps=used_otps) # short poll
                 if otp_code and otp_code not in used_otps:
                     break
                 elif otp_code in used_otps:
@@ -314,7 +314,7 @@ def _wait_for_outlook_ready(page, timeout: int = 30):
     logger.warning("Outlook load timeout, proceeding anyway...")
 
 
-def _wait_for_amazon_email(page, device, max_wait: int) -> str | None:
+def _wait_for_amazon_email(page, device, max_wait: int, used_otps: set = None) -> str | None:
     """
     Wait for Amazon verification email and extract OTP code.
     
@@ -322,11 +322,14 @@ def _wait_for_amazon_email(page, device, max_wait: int) -> str | None:
         page: Outlook inbox page
         device: DeviceAdapter instance
         max_wait: Maximum seconds to wait
+        used_otps: Set of already-used OTP codes to skip
         
     Returns:
         OTP code string or None
     """
     logger.info(f"⏳ Waiting for Amazon email (max {max_wait}s)...")
+    if used_otps is None:
+        used_otps = set()
     
     start_time = time.time()
     poll_interval = 5
@@ -336,22 +339,34 @@ def _wait_for_amazon_email(page, device, max_wait: int) -> str | None:
         # Dismiss any prompts/dialogs
         _dismiss_outlook_prompts(page, device)
         
-        # Try to find and click Amazon email
-        if _click_amazon_email(page, device):
-            time.sleep(2)
-            
-            # Extract OTP from email content
-            otp = _extract_otp_from_email(page)
-            if otp:
-                return otp
+        # NOTE: Do NOT extract OTP from whatever is currently on screen here.
+        # The reading pane may still show a previously opened (stale) email.
+        # Always navigate into a fresh email click before extracting.
         
-        # Also check if we're already viewing an email with OTP
-        try:
-            otp = _extract_otp_from_email(page)
-            if otp:
-                return otp
-        except:
-            pass
+        # Try to find and click Amazon email (now verifies email actually opened)
+        if _click_amazon_email(page, device, used_otps=used_otps):
+            # Email was clicked AND verified opened — try OTP extraction
+            # Try multiple times since email content may still be rendering
+            for extract_attempt in range(3):
+                time.sleep(1.5)
+                otp = _extract_otp_from_email(page)
+                if otp and otp not in used_otps:
+                    return otp
+                elif otp in used_otps:
+                    logger.warning(f"  ⚠️ Email opened but OTP {otp} was already used, skipping...")
+                    break  # Don't keep re-extracting from the same old email
+                logger.debug(f"  OTP extraction attempt {extract_attempt + 1}/3 — no code found yet")
+            
+            # If we got here, email opened but no OTP found
+            logger.warning("Email opened but couldn't extract OTP. Navigating back to inbox...")
+            try:
+                page.goto("https://outlook.live.com/mail/0/inbox", wait_until="domcontentloaded", timeout=15000)
+                _wait_for_outlook_ready(page, timeout=10)
+                time.sleep(1)
+            except:
+                pass
+        else:
+            logger.debug("Amazon email not found or couldn't be opened in this cycle")
         
         elapsed = int(time.time() - start_time)
         if elapsed % 15 == 0 and elapsed > 0:
@@ -363,7 +378,7 @@ def _wait_for_amazon_email(page, device, max_wait: int) -> str | None:
             if refresh_count <= 3:  # Max 3 refreshes
                 try:
                     logger.info("🔄 Refreshing inbox...")
-                    page.reload(wait_until="domcontentloaded")
+                    page.goto("https://outlook.live.com/mail/0/inbox", wait_until="domcontentloaded", timeout=15000)
                     time.sleep(3)
                     _wait_for_outlook_ready(page, timeout=15)
                 except:
@@ -401,13 +416,77 @@ def _dismiss_outlook_prompts(page, device):
         except:
             continue
 
-def _click_amazon_email(page, device) -> bool:
+def _verify_email_opened(page, timeout: int = 3) -> bool:
+    """
+    Verify that an email was actually opened (not just clicked on a container).
+    Checks for email body indicators or URL change to /mail/0/id/.
+    """
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            url = page.url
+            # Outlook changes URL to include message ID when email is opened
+            if "/mail/0/id/" in url or "/mail/id/" in url:
+                logger.debug("  ✅ Email opened (URL contains message ID)")
+                return True
+            
+            # Check for email body / reading pane indicators
+            body_indicators = [
+                "div[role='document']",           # Email body container
+                "div[aria-label='Message body']",  # Message body
+                "div.wide-content-host",           # Wide content host (email view)
+                "div[data-testid='ReadingPane']",  # Reading pane
+                "button[aria-label='Reply']",      # Reply button = email is open
+                "button[aria-label='Reply all']",  
+                "button[aria-label='Delete']",     # Delete visible = email view
+            ]
+            for indicator in body_indicators:
+                try:
+                    if page.locator(indicator).first.is_visible(timeout=200):
+                        logger.debug(f"  ✅ Email opened (found '{indicator}')")
+                        return True
+                except:
+                    continue
+        except:
+            pass
+        time.sleep(0.5)
+    
+    logger.debug("  ❌ Email did NOT open after click (no body indicators found)")
+    return False
+
+
+def _click_amazon_email(page, device, used_otps: set = None) -> bool:
     """
     Find and click Amazon verification email in Outlook.
+    Prioritizes the FIRST (most recent) Amazon email in the inbox to avoid
+    re-opening a stale email that produced an already-used OTP.
     
     Returns:
-        True if email was clicked
+        True if email was clicked AND actually opened (verified).
     """
+    if used_otps is None:
+        used_otps = set()
+    # Helper to attempt click and verify email opened
+    def _try_click_and_verify(el, label: str) -> bool:
+        """Click an email element and verify it actually opened."""
+        try:
+            el.scroll_into_view_if_needed()
+            time.sleep(0.3)
+        except:
+            pass
+        
+        # Always prefer js_click for reliability on mobile
+        try:
+            device.js_click(el, label)
+        except:
+            try:
+                device.tap(el, label)
+            except:
+                return False
+        
+        time.sleep(1)
+        return _verify_email_opened(page, timeout=3)
+    
     # 0. User Requested & Semantic Selectors - High Priority
     selectors = [
         "article[data-testid='MailListItem']", # DevTools semantic - High Priority
@@ -417,73 +496,107 @@ def _click_amazon_email(page, device) -> bool:
     
     for selector in selectors:
         try:
-            email_el = page.locator(selector).first
-            if _safe_is_visible(email_el, timeout=200):
-                # Verify it's actually Amazon before clicking
+            # Check all matching elements — find FIRST (most recent) one with "amazon" text
+            items = page.locator(selector).all()
+            for email_el in items[:5]:  # Check top 5, first = most recent
+                if not _safe_is_visible(email_el, timeout=200):
+                    continue
                 text = email_el.text_content().lower()
                 if "amazon" in text:
-                    logger.info(f"📨 Found Amazon email via '{selector}', using JS click fallback...")
-                    # Force scroll for mobile view reliability
-                    email_el.scroll_into_view_if_needed()
-                    time.sleep(0.5)
-                    
-                    # User Request: JS click fallback for reliability
-                    try:
-                        device.js_click(email_el, "Amazon email (JS)")
-                    except:
-                        device.tap(email_el, "Amazon email (Tap)")
-                    return True
+                    # Quick pre-check: if this element's visible text contains an already-used OTP, skip it
+                    if used_otps and any(otp in text for otp in used_otps):
+                        logger.info(f"  ⏩ Skipping email (contains already-used OTP): {text[:80]}")
+                        continue
+                    logger.info(f"📨 Found Amazon email via '{selector}', clicking (first match = most recent)...")
+                    if _try_click_and_verify(email_el, "Amazon email (semantic)"):
+                        return True
+                    else:
+                        logger.warning(f"  ⚠️ Click on '{selector}' didn't open email, trying next...")
         except: continue
 
     # 1. Look for VERY RECENT Amazon emails (e.g. 'now', '0 min', '1 min')
     recent_selectors = [
         "div:has-text('Account data access attempt'):has-text('now')",
         "div:has-text('Account data access attempt'):has-text('min')",
+        "div:has-text('Your Amazon security code'):has-text('now')",
+        "div:has-text('Your Amazon security code'):has-text('min')",
         "div:has-text('Verify your new Amazon account'):has-text('now')",
+        "div:has-text('Amazon security alert'):has-text('now')",
+        "div:has-text('Amazon security alert'):has-text('min')",
     ]
     
     for selector in recent_selectors:
         try:
-            email_el = page.locator(selector).first
+            # Use last() instead of first() — innermost match is more specific
+            email_el = page.locator(selector).last
             if _safe_is_visible(email_el, timeout=200):
                 logger.info(f"✨ Found RECENT Amazon email: {selector}")
-                device.tap(email_el, "Recent Amazon email")
-                return True
+                if _try_click_and_verify(email_el, "Recent Amazon email"):
+                    return True
+                logger.warning(f"  ⚠️ Recent email click didn't open, trying next...")
         except: continue
 
-    # 2. Fallback to top-most Amazon email regardless of specific timestamp text
-    amazon_selectors = [
-        # Specific 2FA / Security Subjects
-        "div:has-text('Account data access attempt')",
-        "div:has-text('Verify your new Amazon account')",
-        "div:has-text('Amazon password assistance')",
-        "div:has-text('Your Amazon security code')",
-        # Generic Amazon
-        "div:has-text('amazon.com')",
-        "div:has-text('Amazon'):has-text('Verify')",
+    # 2. Fallback to Amazon email using tighter scoped selectors
+    amazon_subject_keywords = [
+        'Account data access attempt',
+        'Your Amazon security code',
+        'Amazon security alert',
+        'Verify your new Amazon account',
+        'Amazon password assistance',
+        'One Time Password',
+        'security code',
     ]
     
-    for selector in amazon_selectors:
+    # Try role='option' items first (Outlook email list items)
+    try:
+        list_items = page.locator("div[role='option']").all()
+        for item in list_items[:5]:
+            try:
+                text = item.text_content().lower()
+                if "amazon" in text:
+                    if used_otps and any(otp in text for otp in used_otps):
+                        logger.info(f"  ⏩ Skipping list item (stale OTP found in preview): {text[:80]}")
+                        continue
+                    logger.info(f"📨 Found Amazon email in role='option' list item")
+                    if _try_click_and_verify(item, "Amazon email (list item)"):
+                        return True
+                    logger.warning("  ⚠️ List item click didn't open, trying next...")
+            except:
+                continue
+    except:
+        pass
+    
+    # Try data-convid items (another Outlook email attribute)
+    try:
+        conv_items = page.locator("div[data-convid]").all()
+        for item in conv_items[:5]:
+            try:
+                text = item.text_content().lower()
+                if "amazon" in text:
+                    if used_otps and any(otp in text for otp in used_otps):
+                        logger.info(f"  ⏩ Skipping conv item (stale OTP found in preview): {text[:80]}")
+                        continue
+                    logger.info(f"📨 Found Amazon email via data-convid")
+                    if _try_click_and_verify(item, "Amazon email (conversation)"):
+                        return True
+                    logger.warning("  ⚠️ Conversation item click didn't open, trying next...")
+            except:
+                continue
+    except:
+        pass
+    
+    # 3. Last resort: broad subject-line text selectors with .last (innermost match)
+    for keyword in amazon_subject_keywords:
         try:
-            # We use first() to get the top-most (newest) in Outlook's list
-            email_el = page.locator(selector).first
+            selector = f"div:has-text('{keyword}')"
+            email_el = page.locator(selector).last  # .last = innermost, most specific
             if _safe_is_visible(email_el, timeout=200):
-                logger.info(f"📨 Found top-most Amazon email via '{selector}'")
-                device.tap(email_el, "Amazon email")
-                return True
+                logger.info(f"📨 Found Amazon email via '{selector}' (last/innermost)")
+                if _try_click_and_verify(email_el, "Amazon email (text match)"):
+                    return True
+                logger.warning(f"  ⚠️ Text-match click didn't open, trying next...")
         except:
             continue
-    
-    # 3. Last resort: top item that mentions Amazon
-    try:
-        items = page.locator("div[role='option'], div[data-convid], [role='listitem']").all()
-        for item in items[:3]: 
-            text = item.text_content().lower()
-            if "amazon" in text:
-                logger.info("📨 Found Amazon-related item in top 3")
-                device.tap(item, "Amazon email item")
-                return True
-    except: pass
     
     return False
 

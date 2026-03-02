@@ -1,126 +1,145 @@
-import sys
+import subprocess
 import os
-import time
-import argparse
+import sys
+import shutil
+import platform
 
-# ==============================================================================
-# DEFAULT CONFIGURATION
-# ==============================================================================
-PROFILE_NAME = "Mobile_Setup_Profile"  # Name of the AdsPower profile
-PLATFORM = "android"                   # Target platform: android or ios (for phone)
-COUNTRY = "au"                         # Proxy country (us, be, fr, de, it, ca, etc.)
-GROUP_ID = "0"                         # AdsPower Group ID (default "0")
-OPEN_BROWSER = True                    # Open the browser immediately after setup
-HEADLESS = False                       # If OPEN_BROWSER is True, run in background?
-APPLY_HARDENING = True                 # Automatically apply OS-specific hardening
-# ==============================================================================
+def run_command(command, shell=False):
+    """Run a system command and exit on failure."""
+    print(f"\n[INFO] Executing: {' '.join(command) if isinstance(command, list) else command}")
+    try:
+        # On Windows, we need shell=True for some commands if they are not absolute paths
+        # but subprocess.check_call works well with list on both if executable is found
+        subprocess.check_call(command, shell=shell)
+    except subprocess.CalledProcessError as e:
+        print(f"\n[ERROR] Command failed with exit code {e.returncode}")
+        sys.exit(1)
+    except FileNotFoundError:
+        print(f"\n[ERROR] Could not find executable for command: {command}")
+        sys.exit(1)
 
-# Add the current directory to sys.path so we can import 'auto'
-sys.path.append(os.getcwd())
-
-try:
-    from modules.adspower import AdsPowerProfileManager
-    from modules.proxy import get_proxy_config
-    from loguru import logger
-except ImportError as e:
-    print(f"❌ Error: Could not import necessary modules. {e}")
-    print("Ensure you are running this script from the project root directory.")
-    sys.exit(1)
-
-def setup_single_profile(manager, name, platform, country, group_id, open_browser, headless, apply_hardening):
-    """
-    Creates and configures a single profile.
-    """
-    logger.info(f"--- Setting up profile: {name} ---")
+def clean_project():
+    """Remove temporary files and caches."""
+    print("\n[INFO] Cleaning project artifacts...")
     
-    # 1. Configure Proxy
-    logger.info(f"Step 1: Generating Decodo proxy for country '{country}'...")
-    proxy_config = get_proxy_config(country=country)
-    
-    if not proxy_config:
-        logger.error(f"❌ Failed to generate proxy configuration for '{country}'.")
-        return None
+    # Remove __pycache__ directories
+    for root, dirs, files in os.walk("."):
+        if "__pycache__" in dirs:
+            pycache_path = os.path.join(root, "__pycache__")
+            print(f"  Removing {pycache_path}")
+            shutil.rmtree(pycache_path)
+            
+    # Remove .venv if it exists (though the script might have been called to recreate it)
+    if os.path.exists(".venv"):
+        print("  Removing existing .venv...")
+        shutil.rmtree(".venv")
 
-    # 2. Create a new profile with the proxy and specified platform
-    logger.info(f"Step 2: Creating a new {platform} profile named '{name}'...")
-    profile_id = manager.create_random_profile(
-        name=name, 
-        group_id=group_id, 
-        proxy_config=proxy_config,
-        fingerprint_config={"os": platform}
-    )
+def setup_venv():
+    """Create and return paths for virtual environment."""
+    print("\n[INFO] Creating virtual environment...")
+    python_cmd = sys.executable
+    run_command([python_cmd, "-m", "venv", ".venv"])
     
-    if not profile_id:
-        logger.error("❌ Failed to create profile.")
-        return None
-    
-    # 3. Apply Hardening
-    if apply_hardening:
-        logger.info("Step 3: Applying OS-specific hardening...")
-        inspection = manager.inspect_profile_live(profile_id)
-        system = inspection.get("system", "Unknown")
-        
-        logger.info(f"Detected System: {system}")
-        hardening_config = manager.generate_hardening_config(system)
-        
-        if manager.apply_hardening(profile_id, hardening_config, system):
-            logger.success("✅ Hardening applied successfully")
-        else:
-            logger.warning("⚠️ Hardening application failed")
-
-    # 4. Open Browser
-    if open_browser:
-        logger.info(f"Step 4: Opening the browser (Headless={headless})...")
-        headless_val = 1 if headless else 0
-        manager.start_profile(profile_id, headless=headless_val, open_tabs=1)
-        logger.success(f"🎊 Browser is now open for profile {profile_id}")
+    if platform.system() == "Windows":
+        venv_python = os.path.join(".venv", "Scripts", "python.exe")
+        venv_pip = os.path.join(".venv", "Scripts", "pip.exe")
     else:
-        logger.success(f"🎊 Profile created: {profile_id}")
+        venv_python = os.path.join(".venv", "bin", "python")
+        venv_pip = os.path.join(".venv", "bin", "pip")
+        
+    return venv_python, venv_pip
+
+def install_dependencies(venv_python):
+    """Install requirements and browser binaries."""
+    print("\n[INFO] Upgrading pip and setuptools...")
+    run_command([venv_python, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"])
     
-    return profile_id
+    if os.path.exists("requirements.txt"):
+        print("\n[INFO] Installing dependencies from requirements.txt...")
+        # Use python -m pip for better reliability across different shell environments
+        run_command([venv_python, "-m", "pip", "install", "-r", "requirements.txt"])
+    else:
+        print("\n[WARNING] requirements.txt not found. Skipping dependency installation.")
+
+    # Verification Step
+    print("\n[INFO] Verifying critical packages...")
+    critical_pkgs = ["playwright", "agentql", "patchright", "loguru"]
+    missing = []
+    for pkg in critical_pkgs:
+        try:
+            subprocess.check_call([venv_python, "-c", f"import {pkg}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except subprocess.CalledProcessError:
+            missing.append(pkg)
+    
+    if missing:
+        print(f"  ⚠️ Missing packages: {', '.join(missing)}. Force-installing...")
+        run_command([venv_python, "-m", "pip", "install"] + missing)
+    else:
+        print("  ✅ All critical packages (playwright, agentql, patchright, loguru) are present.")
+
+    print("\n[INFO] Installing Playwright browser binaries...")
+    run_command([venv_python, "-m", "playwright", "install", "chromium"])
+
+def setup_env_file():
+    """Initialize .env file if it doesn't exist."""
+    print("\n[INFO] Checking environment configuration...")
+    if not os.path.exists(".env"):
+        if os.path.exists(".env.example"):
+            print("  Creating .env from .env.example...")
+            shutil.copy(".env.example", ".env")
+            print("  Created .env. PLEASE UPDATE IT WITH YOUR ACTUAL CREDENTIALS!")
+        else:
+            print("  [WARNING] Neither .env nor .env.example found. Creating empty .env...")
+            with open(".env", "w") as f:
+                f.write("# Project Environment Variables\n")
+    else:
+        print("  .env already exists. Skipping.")
 
 def main():
-    parser = argparse.ArgumentParser(description="AdsPower Profile Setup Script")
-    parser.add_argument("--count", "-c", type=int, default=1, help="Number of profiles to create (default: 1)")
-    parser.add_argument("--name", "-n", type=str, default=PROFILE_NAME, help=f"Base name for the profiles (default: {PROFILE_NAME})")
-    parser.add_argument("--platform", "-p", type=str, default=PLATFORM, choices=["android", "ios", "windows", "mac", "linux"], help=f"Target platform (default: {PLATFORM})")
-    parser.add_argument("--country", type=str, default=COUNTRY, help=f"Proxy country code (default: {COUNTRY})")
-    parser.add_argument("--no-open", action="store_true", help="Don't open the browser after creation")
-    parser.add_argument("--headless", action="store_true", default=HEADLESS, help="Run browser in headless mode")
-    parser.add_argument("--no-hardening", action="store_false", dest="apply_hardening", default=APPLY_HARDENING, help="Skip OS-specific hardening")
+    # Detect platform
+    current_os = platform.system()
+    print(f"=== Project Setup: Detecting OS... {current_os} ===")
     
-    args = parser.parse_args()
+    if current_os not in ["Windows", "Darwin", "Linux"]:
+        print(f"[WARNING] Unsupported OS detected: {current_os}. Proceeding anyway...")
 
-    logger.info(f"🚀 Starting AdsPower Profile Setup for {args.count} profile(s)...")
-    
-    manager = AdsPowerProfileManager()
-    
-    created_ids = []
-    for i in range(args.count):
-        # Add index suffix if count > 1
-        current_name = f"{args.name}_{i+1}" if args.count > 1 else args.name
-        
-        profile_id = setup_single_profile(
-            manager=manager,
-            name=current_name,
-            platform=args.platform,
-            country=args.country,
-            group_id=GROUP_ID,
-            open_browser=not args.no_open,
-            headless=args.headless,
-            apply_hardening=args.apply_hardening
-        )
-        
-        if profile_id:
-            created_ids.append(profile_id)
-            if args.count > 1 and i < args.count - 1:
-                # Small delay between multiple creations to avoid API rate limits or timing issues
-                time.sleep(2)
+    # Set working directory to project root
+    os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
-    if created_ids:
-        logger.success(f"✅ Successfully created {len(created_ids)} profile(s): {' '.join(created_ids)}")
+    # Step 1: Clean
+    clean_project()
+
+    # Step 2: Setup Venv
+    venv_python, _ = setup_venv()
+
+    # Step 3: Install
+    install_dependencies(venv_python)
+
+    # Step 4: Env Setup
+    setup_env_file()
+    
+    # Ensure setup.sh is executable on Unix systems
+    if current_os != "Windows" and os.path.exists("setup.sh"):
+        os.chmod("setup.sh", 0o755)
+
+    print("\n" + "="*50)
+    print("✅ SETUP LOGIC COMPLETE!")
+    print("="*50)
+    print(f"Virtual environment location: {os.path.abspath('.venv')}")
+    
+    if "--no-shell" not in sys.argv:
+        print("\n[IMPORTANT] To activate this environment in your current shell, run:")
+        if current_os == "Windows":
+            print("    .\\setup.bat")
+        else:
+            print("    source ./setup.sh")
+    
+    print("\nAlternatively, you can manually activate with:")
+    if current_os == "Windows":
+        print(f"    .venv\\Scripts\\activate")
     else:
-        logger.error("❌ No profiles were created.")
+        print(f"    source .venv/bin/activate")
+    print("="*50)
 
 if __name__ == "__main__":
     main()

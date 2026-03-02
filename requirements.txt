@@ -1,6 +1,7 @@
 agentql
 playwright
 patchright
+playwright-dompath
 loguru
 requests
 phonenumbers
@@ -14,3 +15,4 @@ psutil
 PhotoshopAPI
 psd-tools
 Pillow
+rembg[cpu]

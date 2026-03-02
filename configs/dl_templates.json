@@ -1,0 +1,279 @@
+{
+    "GB": {
+        "alias": [
+            "UK"
+        ],
+        "versions": {
+            "v1": {
+                "min_width": 0,
+                "max_width": 2000,
+                "layer_map": {
+                    "last_name": {
+                        "placeholder": "LAST"
+                    },
+                    "first_name": {
+                        "placeholder": "FIRST"
+                    },
+                    "dob": {
+                        "placeholder": "07-12-90"
+                    },
+                    "address": {
+                        "placeholder": "16 MERVINIAN CLOSE"
+                    },
+                    "city": {
+                        "placeholder": "CARDIFF"
+                    },
+                    "zip": {
+                        "placeholder": "CF10 4BU"
+                    },
+                    "license_num": {
+                        "placeholder": "LAST912070R94GY 12"
+                    }
+                },
+                "fonts": {
+                    "main": {
+                        "name": "DVLA.otf",
+                        "size": 36
+                    },
+                    "ocr": {
+                        "name": "Ocrb_1.ttf",
+                        "size": 32
+                    },
+                    "sig": {
+                        "name": "USATEMPLATE.ttf",
+                        "size": 40
+                    }
+                },
+                "fields": {
+                    "dob": {
+                        "format": "{day}-{month}-{year_short}"
+                    }
+                },
+                "photo": {
+                    "pos": [
+                        86,
+                        343
+                    ],
+                    "size": [
+                        412,
+                        503
+                    ]
+                },
+                "signature": {
+                    "pos": [
+                        600,
+                        680
+                    ],
+                    "size": [
+                        400,
+                        150
+                    ]
+                }
+            },
+            "v3": {
+                "min_width": 4000,
+                "max_width": 10000,
+                "layer_map": {
+                    "last_name": {
+                        "placeholder": "SMITH"
+                    },
+                    "first_name": {
+                        "placeholder": "FIRST NAMES"
+                    },
+                    "dob": {
+                        "placeholder": "01.01.1990"
+                    },
+                    "address": {
+                        "placeholder": "123 SOME STREET"
+                    },
+                    "city": {
+                        "placeholder": "LONDON"
+                    },
+                    "zip": {
+                        "placeholder": "NW1 6XE"
+                    },
+                    "license_num": {
+                        "placeholder": "SMITH900101X99XX"
+                    }
+                },
+                "fonts": {
+                    "main": {
+                        "name": "DVLA.otf",
+                        "size": 100
+                    },
+                    "ocr": {
+                        "name": "Ocrb_1.ttf",
+                        "size": 90
+                    },
+                    "sig": {
+                        "name": "USATEMPLATE.ttf",
+                        "size": 150
+                    }
+                },
+                "fields": {
+                    "dob": {
+                        "format": "{day}.{month}.{year}"
+                    }
+                },
+                "photo": {
+                    "pos": [
+                        1046,
+                        1342
+                    ],
+                    "size": [
+                        844,
+                        1058
+                    ]
+                },
+                "signature": {
+                    "pos": [
+                        2668,
+                        1913
+                    ],
+                    "size": [
+                        1000,
+                        337
+                    ]
+                }
+            }
+        }
+    },
+    "AU": {
+        "alias": [
+            "AUSTRALIA"
+        ],
+        "versions": {
+            "v1": {
+                "min_width": 2000,
+                "max_width": 3000,
+                "layer_map": {
+                    "full_name": {
+                        "placeholder": "SANTA CLAUS"
+                    },
+                    "address": {
+                        "placeholder": "000 LAPAND, LAPAND"
+                    },
+                    "city_state_zip": {
+                        "placeholder": "KEW EAST VIC 3102"
+                    },
+                    "license_num": {
+                        "placeholder": "000000000"
+                    },
+                    "license_num_overlay": {
+                        "placeholder": "0000000"
+                    },
+                    "expiry": {
+                        "placeholder": "00-00-0000",
+                        "index": 0
+                    },
+                    "dob": {
+                        "placeholder": "00-00-0000",
+                        "index": 1
+                    }
+                },
+                "fonts": {
+                    "main": {
+                        "name": "Tahoma.ttf",
+                        "size": 52
+                    },
+                    "ocr": {
+                        "name": "Ocrb_1.ttf",
+                        "size": 52
+                    },
+                    "sig": {
+                        "name": "Halimun.ttf",
+                        "size": 250
+                    }
+                },
+                "fields": {
+                    "full_name": {
+                        "format": "{first} {last}"
+                    },
+                    "expiry": {
+                        "format": "31-12-2030"
+                    },
+                    "dob": {
+                        "format": "{day}-{month}-{year}"
+                    },
+                    "license_num_overlay": {
+                        "key": "license_num",
+                        "font": "main",
+                        "fill": [
+                            220,
+                            220,
+                            220,
+                            255
+                        ],
+                        "tracking": 15,
+                        "emboss": true,
+                        "shadow": {
+                            "offset": [
+                                2,
+                                3
+                            ],
+                            "fill": [
+                                0,
+                                0,
+                                0,
+                                150
+                            ]
+                        }
+                    }
+                },
+                "photo": {
+                    "pos": [1450, 542],
+                    "size": [600, 624]
+                },
+                "signature": {
+                    "pos": [651, 1016],
+                    "size": [668, 286]
+                }
+            }
+        },
+        "back_versions": {
+            "v1": {
+                "min_width": 2000,
+                "max_width": 3000,
+                "layer_map": {
+                    "dob_left": {
+                        "placeholder": "00-00-0000",
+                        "index": 0
+                    },
+                    "dob": {
+                        "placeholder": "00-00-0000",
+                        "index": 1
+                    },
+                    "expiry": {
+                        "placeholder": "00-00-0000",
+                        "index": 2
+                    },
+                    "doc_num": {
+                        "placeholder": "A0000000"
+                    }
+                },
+                "fonts": {
+                    "main": {
+                        "name": "Tahoma.ttf",
+                        "size": 52
+                    }
+                },
+                "fields": {
+                    "dob_left": {
+                        "format": "{day}-{month}-{year}"
+                    },
+                    "dob": {
+                        "format": "{day}-{month}-{year}"
+                    },
+                    "expiry": {
+                        "format": "31-12-2030"
+                    },
+                    "doc_num": {
+                        "key": "license_num",
+                        "case": "upper",
+                        "default": "A0000000"
+                    }
+                }
+            }
+        }
+    }
+}

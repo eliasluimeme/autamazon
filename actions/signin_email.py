@@ -201,11 +201,12 @@ def handle_email_signin_step(page, identity, device: DeviceAdapter = None) -> bo
                     pass
             return False
 
-        logger.info("Attempting to submit form (Enter -> Click -> JS)...")
+        logger.info("Attempting to submit form (Enter → Click → JS)...")
+        
         # Step 2a: Press Enter inside the input field (Fastest, organic)
         try:
-            email_input.press("Enter", timeout=1500)
-            time.sleep(2)
+            email_input.press("Enter", timeout=800)
+            time.sleep(1)
         except Exception as e:
             logger.debug(f"Pressing Enter failed: {e}")
             
@@ -213,26 +214,37 @@ def handle_email_signin_step(page, identity, device: DeviceAdapter = None) -> bo
             logger.success("✅ Email entered and advanced via Enter key!")
             return True
 
-        # Step 2b: Standard explicit clicks
+        # Step 2b: Standard explicit clicks (fast chain — no 30s JS timeouts)
         if continue_btn:
+            # Try 1: Standard click
             try:
-                # Standard click (important for blur/change validation)
-                continue_btn.click(timeout=3000)
-                time.sleep(2)
+                continue_btn.click(timeout=2000)
+                time.sleep(1)
+                if has_progressed():
+                    logger.success("✅ Email entered and Continue clicked natively!")
+                    return True
             except:
-                try:
-                    continue_btn.click(force=True, timeout=1500)
-                    time.sleep(2)
-                except:
-                    device.js_click(continue_btn, "Continue button")
-                    time.sleep(2)
+                pass
             
+            # Try 2: Force click 
+            try:
+                continue_btn.click(force=True, timeout=1500)
+                time.sleep(1)
+                if has_progressed():
+                    logger.success("✅ Email entered and Continue clicked natively!")
+                    return True
+            except:
+                pass
+            
+            # Try 3: JS click (with reduced 5s timeout via device_adapter)
+            device.js_click(continue_btn, "Continue button")
+            time.sleep(1)
             if has_progressed():
-                logger.success("✅ Email entered and Continue clicked natively!")
+                logger.success("✅ Email entered and Continue clicked via JS!")
                 return True
                 
-        # JS Fallback Click
-        logger.warning("Continue button standard click didn't navigate, trying JS fallback on page...")
+        # Step 2c: Page-level JS Fallback (find and click any submit button)
+        logger.warning("Continue button clicks didn't navigate, trying JS fallback on page...")
         result = page.evaluate("""
             () => {
                 const submitBtns = document.querySelectorAll('input[type="submit"], button[type="submit"], #continue');
@@ -255,7 +267,7 @@ def handle_email_signin_step(page, identity, device: DeviceAdapter = None) -> bo
         """)
         if result:
             logger.info(f"JS fallback click executed: {result}")
-            time.sleep(2)
+            time.sleep(1.5)
             if has_progressed():
                 logger.success("✅ Email entered and Continue clicked via JS fallback!")
                 return True
