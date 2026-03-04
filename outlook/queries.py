@@ -63,8 +63,8 @@ PRIVACY_STEP_QUERY = """
 # Step 7: Passkey / Interruption
 PASSKEY_STEP_QUERY = """
 {
-    skip_button(button to skip passkey setup, labeled Skip for now or Skip)
-    cancel_button(button to cancel passkey creation)
+    skip_button(button to skip passkey setup, labeled exactly "Skip for now" or "Skip")
+    cancel_button(the second button on the page, labeled exactly "Cancel", which dismisses the passkey creation error — do NOT select the first button labeled "Try again")
 }
 """
 

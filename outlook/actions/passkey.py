@@ -1,17 +1,18 @@
 """
 Passkey / Interruption Step Handler
 
-Handles the "We couldn't create a passkey" or "Setting up your passkey" interruption.
+Handles the passkey setup interruption from Microsoft during Outlook signup.
 
-Strategy (3-tier):
-  1. Cached XPath selectors  (fastest — from data/xpath_cache/outlook_selectors.json)
-  2. CSS selectors            (fast — browser-native querySelector)
-  3. AgentQL fallback          (slow but robust — extracts & caches XPaths for next run)
+Flow:
+  1. Press ESC to dismiss the native browser/OS passkey popup (with retry verification)
+  2. Wait for Microsoft to redirect to the "We couldn't create a passkey" error page
+  3. Click "Cancel" on that error page (NOT "Try again")
 
-Fallback:
-  - Press Escape multiple times (to dismiss native/browser popups)
-  - Click "Skip for now" button if available (preferred)
-  - Fall back to "Cancel" button on the page
+Fallback chain (if ESC + error-page cancel doesn't apply):
+  1. Cached XPath selectors  (fastest)
+  2. CSS selectors            (fast)
+  3. AgentQL fallback         (slow but robust)
+  4. get_by_role              (last resort)
 """
 
 import time
@@ -25,54 +26,75 @@ from amazon.outlook.utils.xpath_cache import (
     DOMPATH_AVAILABLE,
 )
 
+# How many ESC rounds to attempt before giving up
+_ESC_MAX_ROUNDS = 4
+# Seconds to wait between checking whether the popup disappeared
+_ESC_CHECK_INTERVAL = 0.8
+
 
 def handle_passkey_step(page, device, agentql_page=None) -> bool:
     """
     Handle the Passkey Setup interruption.
 
-    The user sees system dialogs like "Use Touch ID" or "Choose where to save".
-    We need to dismiss them via keyboard and then skip/cancel the process on the page.
+    Expected sequence:
+      native popup visible  →  ESC keypresses  →  "We couldn't create a passkey" error page
+                                                →  click Cancel  →  proceed
     """
     logger.info("🚫 Handling Passkey/Interruption step")
 
     try:
-        # 1. Press ESC multiple times to dismiss system/browser dialogs
-        logger.info("⌨️ Pressing ESC x3 to dismiss dialogs...")
-        for _ in range(3):
-            page.keyboard.press("Escape")
-            time.sleep(0.5)
-        time.sleep(0.5)
+        # ------------------------------------------------------------------ #
+        # Step 1 — Dismiss the native browser/OS passkey popup via ESC        #
+        # ------------------------------------------------------------------ #
+        popup_dismissed = _dismiss_popup_with_esc(page)
 
-        # Priority 0: Try cached selectors (self-healing)
+        if popup_dismissed:
+            logger.success("✅ Native passkey popup dismissed via ESC")
+        else:
+            logger.warning("⚠️  Could not confirm popup dismissal — continuing anyway")
+
+        # ------------------------------------------------------------------ #
+        # Step 2 — Wait for the "We couldn't create a passkey" error page     #
+        #          then click Cancel                                           #
+        # ------------------------------------------------------------------ #
+        logger.info("⏳ Waiting for passkey error page after ESC...")
+        if _wait_for_error_page(page, timeout=5):
+            logger.info("🔍 Passkey error page detected — clicking Cancel")
+            if _click_cancel_on_error_page(page, device):
+                logger.success("✅ Clicked Cancel on passkey error page")
+                return True
+            logger.warning("⚠️  Error page found but could not click Cancel — trying fallbacks")
+
+        # ------------------------------------------------------------------ #
+        # Step 3 — Fallback chain (skip / cancel via various strategies)      #
+        # ------------------------------------------------------------------ #
+
+        # Fallback 0: Cached XPaths
         try:
-            success = _handle_via_cache(page, device)
-            if success:
+            if _handle_via_cache(page, device):
                 logger.success("✅ PASSKEY step completed via cached selectors")
                 return True
         except Exception as e:
             logger.debug(f"Cached selector approach failed: {e}")
 
-        # Priority 1: Try CSS selectors
+        # Fallback 1: CSS selectors
         try:
-            success = _handle_via_selectors(page, device)
-            if success:
+            if _handle_via_selectors(page, device):
                 return True
         except Exception as e:
             logger.debug(f"CSS selector approach failed: {e}")
 
-        # Priority 2: AgentQL fallback with XPath extraction
+        # Fallback 2: AgentQL
         if agentql_page:
             try:
-                success = _handle_via_agentql(page, agentql_page, device)
-                if success:
+                if _handle_via_agentql(page, agentql_page, device):
                     return True
             except Exception as e:
                 logger.warning(f"AgentQL approach failed: {e}")
 
-        # Priority 3: get_by_role (last resort)
+        # Fallback 3: get_by_role
         try:
-            success = _handle_via_role(page, device)
-            if success:
+            if _handle_via_role(page, device):
                 return True
         except Exception as e:
             logger.debug(f"get_by_role failed: {e}")
@@ -134,10 +156,11 @@ def _handle_via_selectors(page, device) -> bool:
         except Exception:
             pass
 
-    # Cancel buttons (fallback)
+    # Cancel buttons (fallback) — Microsoft auth pages use <input> not <button>
     cancel_selectors = [
+        "input[value='Cancel']",          # Microsoft <input type="button" value="Cancel">
+        "input[value='cancel']",
         "button:has-text('Cancel')",
-        "#idBtn_Back",
         "button[id*='cancel']",
         "a:has-text('Cancel')",
     ]
@@ -151,6 +174,16 @@ def _handle_via_selectors(page, device) -> bool:
                 return _wait_for_navigation(page)
         except Exception:
             pass
+
+    # Last CSS resort: get_by_role matches <input type="button"> by accessible name
+    try:
+        cancel_btn = page.get_by_role("button", name="Cancel")
+        if cancel_btn.is_visible(timeout=1000):
+            logger.info("✅ Found Cancel button via get_by_role")
+            device.tap(cancel_btn, description="Passkey Cancel Button (role)")
+            return _wait_for_navigation(page)
+    except Exception:
+        pass
 
     return False
 
@@ -218,6 +251,7 @@ def _handle_via_role(page, device) -> bool:
     except Exception:
         pass
 
+    # Explicitly avoid "Try again" — only target "Cancel"
     try:
         cancel_btn = page.get_by_role("button", name="Cancel")
         if cancel_btn.is_visible(timeout=500):
@@ -227,6 +261,173 @@ def _handle_via_role(page, device) -> bool:
     except Exception:
         pass
 
+    return False
+
+
+# ---------------------------------------------------------------------------
+# ESC dismissal with retry verification
+# ---------------------------------------------------------------------------
+
+def _dismiss_popup_with_esc(page) -> bool:
+    """
+    Press ESC repeatedly and verify the native passkey popup has been dismissed.
+
+    Strategy:
+      - Round 1-N: press ESC 2×, wait, check if a dialog/popup is still overlaying the page.
+      - We consider the popup gone when:
+          a) No [role=dialog] / [role=alertdialog] is visible on the page, OR
+          b) The page URL has changed to include 'passkey' or 'interrupt' (error redirect), OR
+          c) A Cancel / Skip button is now visible in the page DOM.
+      - After _ESC_MAX_ROUNDS with no confirmation we still return False but have
+        pressed ESC a total of (rounds × 2) times.
+    """
+    logger.info(f"⌨️  Pressing ESC to dismiss native passkey popup (max {_ESC_MAX_ROUNDS} rounds)...")
+
+    for round_num in range(1, _ESC_MAX_ROUNDS + 1):
+        # Two ESC presses per round — some OS dialogs need multiple
+        page.keyboard.press("Escape")
+        time.sleep(0.3)
+        page.keyboard.press("Escape")
+        time.sleep(_ESC_CHECK_INTERVAL)
+
+        logger.debug(f"  ESC round {round_num}/{_ESC_MAX_ROUNDS} — checking popup state...")
+
+        # Check 1: Error page heading appeared — means popup was dismissed and page redirected
+        try:
+            heading = page.locator("h1, h2, [class*='title'], [class*='heading']").first
+            text = heading.inner_text(timeout=400)
+            if "couldn't create" in text.lower() or "could not create" in text.lower():
+                logger.info(f"  ✅ Round {round_num}: Error page heading detected — popup dismissed")
+                return True
+        except Exception:
+            pass
+
+        # Check 2: No visible dialog overlay remaining
+        try:
+            dialog_visible = page.locator("[role='dialog'], [role='alertdialog']").first.is_visible(timeout=300)
+            if not dialog_visible:
+                logger.info(f"  ✅ Round {round_num}: No dialog overlay detected — popup dismissed")
+                return True
+        except Exception:
+            # Timeout / not found = popup is gone
+            logger.info(f"  ✅ Round {round_num}: Dialog locator timed out — popup likely gone")
+            return True
+
+        # Check 3: The known Cancel button (second button in #view) is now visible
+        try:
+            cancel_btn = page.locator("xpath=//*[@id='view']/div/div[5]/button[2]")
+            if cancel_btn.is_visible(timeout=300):
+                logger.info(f"  ✅ Round {round_num}: Cancel button visible via XPath — popup dismissed")
+                return True
+        except Exception:
+            pass
+
+        logger.debug(f"  ⟳  Round {round_num}: popup may still be active, retrying ESC...")
+
+    logger.warning(f"⚠️  Popup not confirmed dismissed after {_ESC_MAX_ROUNDS} ESC rounds")
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Wait for the "We couldn't create a passkey" error page
+# ---------------------------------------------------------------------------
+
+def _wait_for_error_page(page, timeout: int = 6) -> bool:
+    """
+    Poll for the "We couldn't create a passkey" error page for up to `timeout` seconds.
+    Detection is heading-based (not URL-based) because the enrollment URL already
+    contains 'passkey'+'enroll' before the popup is dismissed.
+    Returns True as soon as we detect we're on the error page.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            # Primary: known XPath for Cancel button only appears on the error page
+            cancel_btn = page.locator("xpath=//*[@id='view']/div/div[5]/button[2]")
+            if cancel_btn.is_visible(timeout=400):
+                return True
+        except Exception:
+            pass
+
+        try:
+            # Secondary: page heading contains the error message
+            heading = page.locator("h1, h2, [class*='title'], [class*='heading']").first
+            text = heading.inner_text(timeout=400)
+            if "couldn't create" in text.lower() or "could not create" in text.lower():
+                return True
+        except Exception:
+            pass
+
+        time.sleep(0.4)
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Click Cancel on the error page
+# ---------------------------------------------------------------------------
+
+def _click_cancel_on_error_page(page, device) -> bool:
+    """
+    Click the Cancel button on the "We couldn't create a passkey" error page.
+    Cancel is the SECOND button; Try again is the FIRST. Never target button[1].
+    """
+    # ── Priority 1: Direct XPath (most reliable — Cancel is button[2]) ──────
+    try:
+        btn = page.locator("xpath=//*[@id='view']/div/div[5]/button[2]")
+        if btn.is_visible(timeout=1500):
+            logger.info("  ✅ Cancel via known XPath (button[2])")
+            device.tap(btn, description="Cancel on passkey error page (XPath)")
+            return True
+    except Exception:
+        pass
+
+    # ── Priority 2: Second button inside #view (nth-based, avoids Try again) ─
+    try:
+        btn = page.locator("#view button").nth(1)   # 0-indexed → second button = Cancel
+        if btn.is_visible(timeout=1000):
+            logger.info("  ✅ Cancel via #view button nth(1)")
+            device.tap(btn, description="Cancel on passkey error page (nth)")
+            return True
+    except Exception:
+        pass
+
+    # ── Priority 3: Text-based selectors ────────────────────────────────────
+    for selector in [
+        "input[value='Cancel']",
+        "input[value='cancel']",
+        "button:has-text('Cancel')",
+        "a:has-text('Cancel')",
+    ]:
+        try:
+            btn = page.locator(selector).first
+            if btn.is_visible(timeout=1000):
+                logger.info(f"  ✅ Cancel via selector: {selector}")
+                device.tap(btn, description="Cancel on passkey error page")
+                return True
+        except Exception:
+            pass
+
+    # ── Priority 4: Accessible role ─────────────────────────────────────────
+    try:
+        btn = page.get_by_role("button", name="Cancel")
+        if btn.is_visible(timeout=1000):
+            logger.info("  ✅ Cancel via get_by_role")
+            device.tap(btn, description="Cancel on passkey error page (role)")
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Special: "We couldn't create a passkey" error page (kept for fallback chain)
+# ---------------------------------------------------------------------------
+
+def _handle_passkey_error_page(page, device) -> bool:
+    """Legacy wrapper — used by fallback chain."""
+    if _wait_for_error_page(page, timeout=2):
+        return _click_cancel_on_error_page(page, device)
     return False
 
 
