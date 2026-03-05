@@ -12,6 +12,10 @@ SELECTORS = {
         "next_button": "#iSignupAction, button[type='submit']",
         "new_email_link": "#liveSwitch, a:has-text('Get a new email address')",
         "error_message": "#MemberNameError, .error, .alert-error, div:has-text('already taken')",
+        # Domain dropdown — visible when form is in 'split mode' (handle + @domain)
+        "domain_dropdown": "#LiveDomainBoxList, select[id='LiveDomainBoxList'], #DomainBoxList, select[name='DomainList']",
+        # Email format error ("Enter your email address in the format: someone@example.com")
+        "format_error": "#MemberNameError",
         # Suggestion buttons - try multiple patterns
         "suggestions": "button[id^='sugg_'], button[name^='sugg_'], .suggestion-button, button[id*='Sugg'], #suggestions button, div#suggestions button",
     },
@@ -54,7 +58,8 @@ SELECTORS = {
     "passkey": {
         # Various buttons that indicate the passkey screen
         "skip_button": "button:has-text('Skip for now'), button:has-text('Skip'), a:has-text('Skip for now')",
-        "cancel_button": "button:has-text('Cancel'), #idBtn_Back",
+        # NOTE: Do NOT use #idBtn_Back here — on the passkey error page it maps to "Try again"
+        "cancel_button": "button:has-text('Cancel'), input[value='Cancel'], a:has-text('Cancel')",
         # Indicators for detection
         "header": "h1:has-text('passkey'), h2:has-text('passkey'), h1:has-text('Passkey'), h2:has-text('Passkey'), div:has-text('passkey')",
         # Alternative indicators - the "Go passwordless" or similar prompts

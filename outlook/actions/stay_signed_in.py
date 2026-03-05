@@ -35,6 +35,26 @@ def handle_stay_signed_in_step(page, device, agentql_page=None) -> bool:
     """
     logger.info("✅ Handling 'Stay signed in?' step")
 
+    # ── Guard: Verify we're NOT on a passkey/fido page ────────────────
+    # button[type='submit'] on passkey error pages ("Try again") can falsely
+    # match the stay_signed_in_yes cached CSS and cause a stuck loop.
+    try:
+        url = page.url.lower()
+        if any(p in url for p in ("passkey", "fido", "interruption")):
+            logger.warning(
+                f"⚠️ Aborting STAY_SIGNED_IN — URL indicates passkey page: {url}"
+            )
+            return False
+    except Exception:
+        pass
+    try:
+        content = page.content().lower()
+        if "couldn't create a passkey" in content or "setting up your passkey" in content:
+            logger.warning("⚠️ Aborting STAY_SIGNED_IN — page content indicates passkey page")
+            return False
+    except Exception:
+        pass
+
     # Priority 0: Try cached selectors (self-healing)
     try:
         success = _handle_via_cache(page, device)
@@ -84,6 +104,16 @@ def _handle_via_cache(page, device) -> bool:
     """Try using cached XPaths from previous successful runs."""
     yes_el = find_element(page, "stay_signed_in_yes", timeout=2000)
     if yes_el:
+        # Verify button text — must not be "Try again" (passkey error page)
+        try:
+            btn_text = yes_el.inner_text(timeout=500).strip().lower()
+            if "try again" in btn_text or "cancel" in btn_text:
+                logger.warning(
+                    f"⚠️ Cached stay_signed_in_yes matched '{btn_text}' — not a Yes button"
+                )
+                return False
+        except Exception:
+            pass
         logger.info("✅ Found Yes button via cache")
         device.js_click(yes_el, "Yes button (cached)")
         time.sleep(2)

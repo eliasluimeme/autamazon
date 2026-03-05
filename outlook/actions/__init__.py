@@ -10,7 +10,7 @@ from amazon.outlook.actions.name import handle_name_step
 from amazon.outlook.actions.dob import handle_dob_step
 from amazon.outlook.actions.captcha import handle_captcha_step
 from amazon.outlook.actions.privacy import handle_privacy_step
-from amazon.outlook.actions.passkey import handle_passkey_step
+from amazon.outlook.actions.passkey import handle_passkey_step, setup_webauthn_bypass, cleanup_webauthn_bypass
 from amazon.outlook.actions.stay_signed_in import handle_stay_signed_in_step
 from amazon.outlook.actions.detect import detect_current_step
 
@@ -22,6 +22,8 @@ __all__ = [
     "handle_captcha_step",
     "handle_privacy_step",
     "handle_passkey_step",
+    "setup_webauthn_bypass",
+    "cleanup_webauthn_bypass",
     "handle_stay_signed_in_step",
     "detect_current_step",
 ]

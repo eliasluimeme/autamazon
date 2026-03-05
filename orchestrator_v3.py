@@ -516,6 +516,14 @@ def _run_outlook_login_with_email(manager, page, device, email_data: dict, count
             if outlook_data == "RETRY":
                 logger.warning(f"🔄 Outlook login signaled RETRY (Attempt {attempt + 1})")
                 if attempt < max_attempts - 1:
+                    # Close old tab and open fresh one for retry
+                    try:
+                        if not page.is_closed():
+                            page.close()
+                        page = manager.context.new_page()
+                        device.page = page
+                    except Exception as e:
+                        logger.warning(f"Could not recycle tab for retry: {e}")
                     _time.sleep(2)
                     continue
                 return None, None
@@ -629,6 +637,14 @@ def _run_outlook_with_preloaded_identity(manager, page, device, identity: Pooled
             if outlook_data == "RETRY":
                 logger.warning(f"🔄 Outlook signaled retry (Attempt {attempt + 1})")
                 if attempt < max_attempts - 1:
+                    # Close old tab and open fresh one for retry
+                    try:
+                        if not page.is_closed():
+                            page.close()
+                        page = manager.context.new_page()
+                        device.page = page
+                    except Exception as e:
+                        logger.warning(f"Could not recycle tab for retry: {e}")
                     _time.sleep(2)
                     continue
                 else:
@@ -745,7 +761,7 @@ def main():
     parser.add_argument("--os", type=str, default="windows", choices=["windows", "mac", "android", "ios"], help="OS for new profiles")
     parser.add_argument("--concurrency", type=int, default=3, help="Max concurrent profiles")
     parser.add_argument("--pool-size", type=int, default=5, help="Identity pre-generation pool size")
-    parser.add_argument("--country", type=str, default="US", help="Country code for identity generation and proxy")
+    parser.add_argument("--country", type=str, default="AU", help="Country code for identity generation and proxy")
     parser.add_argument("--max-retries", type=int, default=3, help="Max retries per profile (default: 3)")
     parser.add_argument(
         "--skip-outlook-signup",

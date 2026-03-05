@@ -48,16 +48,83 @@ def detect_current_step(page, agentql_page=None) -> str:
 
 
 def _is_network_error(page) -> bool:
+    """Detect if we are on a browser error page OR a Microsoft error page."""
     try:
         title = page.title().lower()
         if "site can't be reached" in title or "error" in title:
             return True
+        
+        # --- Microsoft "Something went wrong" error page detection ---
+        # IMPORTANT: Must NOT false-positive on passkey/interruption pages which
+        # also contain "something went wrong" text.
+        try:
+            url = page.url.lower()
+            is_microsoft_domain = any(d in url for d in (
+                "signup.live.com", "login.live.com", "account.live.com",
+                "login.microsoftonline.com", "account.microsoft.com",
+            ))
+            if is_microsoft_domain:
+                # Skip if URL indicates a known flow page
+                known_flow_urls = (
+                    "passkey", "interrupt", "fido", "privacynotice",
+                    "proofs", "identity", "signup",
+                )
+                if any(kw in url for kw in known_flow_urls):
+                    pass  # Not an error page — it's a known flow step
+                else:
+                    page_text = page.content().lower()
+                    
+                    # Skip if page contains passkey/interruption-specific content
+                    passkey_exclusions = [
+                        "create a passkey", "passkey", "go passwordless",
+                        "setting up your", "stay signed in",
+                    ]
+                    is_passkey_page = any(p in page_text for p in passkey_exclusions)
+                    
+                    if not is_passkey_page:
+                        ms_error_patterns = [
+                            "something went wrong",
+                            "we can't complete this action",
+                            "this service is not available",
+                            "service unavailable",
+                            "temporarily unavailable",
+                            "we're having trouble",
+                            "an error occurred",
+                            "our services aren't available right now",
+                        ]
+                        has_error_text = any(p in page_text for p in ms_error_patterns)
+                        if has_error_text:
+                            has_form = any(tag in page_text for tag in (
+                                'id="membername"', 'id="passwordinput"',
+                                'id="firstname"', 'id="birthyear"',
+                                'name="membername"', 'name="passwd"',
+                                'type="email"', 'type="password"',
+                            ))
+                            if not has_form:
+                                logger.warning(
+                                    f"🛑 Microsoft error page detected: "
+                                    f"{[p for p in ms_error_patterns if p in page_text]}"
+                                )
+                                return True
+        except Exception:
+            pass
+        
+        # --- URL-based error detection ---
+        try:
+            url = page.url.lower()
+            if "error.aspx" in url or "errcode=" in url:
+                logger.warning(f"🛑 Microsoft error URL detected: {url}")
+                return True
+        except Exception:
+            pass
             
         error_indicators = [
             "#main-frame-error",
             "text=ERR_TUNNEL_CONNECTION_FAILED",
             "text=ERR_CONNECTION_REFUSED",
-            "text=ERR_CONNECTION_TIMED_OUT"
+            "text=ERR_CONNECTION_TIMED_OUT",
+            "text=ERR_PROXY_CONNECTION_FAILED",
+            "text=ERR_SSL_PROTOCOL_ERROR",
         ]
         for sel in error_indicators:
             try:

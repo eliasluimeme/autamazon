@@ -24,7 +24,9 @@ from amazon.outlook.actions import (
     handle_captcha_step,
     handle_privacy_step,
     handle_passkey_step,
-    handle_stay_signed_in_step
+    handle_stay_signed_in_step,
+    setup_webauthn_bypass,
+    cleanup_webauthn_bypass,
 )
 
 def run_outlook_signup(page, device):
@@ -42,6 +44,9 @@ def run_outlook_signup(page, device):
     
     # Generate Identity
     identity = generate_outlook_identity(country_code="US")
+    
+    # Pre-emptive WebAuthn bypass — prevents the native passkey dialog from appearing
+    setup_webauthn_bypass(page)
     
     # Navigate to Signup
     logger.info(f"Navigating to {OUTLOOK_SIGNUP_URL}...")
@@ -126,6 +131,16 @@ def run_outlook_signup(page, device):
             success = handle_captcha_step(page, device, agentql_page)
             
         elif current_step == "PASSKEY":
+            passkey_retries = state_retry_counts.get("PASSKEY", 0)
+            if passkey_retries > 5:
+                logger.error("🛑 Passkey loop limit (5) exceeded — navigating away")
+                cleanup_webauthn_bypass(page)
+                try:
+                    page.goto("https://outlook.live.com/mail/0/inbox", wait_until="domcontentloaded", timeout=15000)
+                    time.sleep(2)
+                except Exception:
+                    pass
+                continue
             success = handle_passkey_step(page, device, agentql_page)
             
         elif current_step == "PRIVACY":
@@ -159,6 +174,7 @@ def run_outlook_signup(page, device):
             
         elif current_step == "SUCCESS":
             logger.success(f"🎉 Outlook Account Created: {identity['email_handle']}@outlook.com")
+            cleanup_webauthn_bypass(page)
             # Save to file
             try:
                 with open("created_hotmails.txt", "a") as f:
@@ -209,6 +225,9 @@ def run_outlook_signup_with_identity(page, device, pre_generated_identity: dict)
         f"🆔 Using pre-warmed identity: {identity['firstname']} {identity['lastname']} "
         f"({identity['email_handle']})"
     )
+    
+    # Pre-emptive WebAuthn bypass — prevents the native passkey dialog from appearing
+    setup_webauthn_bypass(page)
     
     # Navigate to Signup
     logger.info(f"Navigating to {OUTLOOK_SIGNUP_URL}...")
@@ -279,6 +298,16 @@ def run_outlook_signup_with_identity(page, device, pre_generated_identity: dict)
         elif current_step == "CAPTCHA":
             success = handle_captcha_step(page, device, agentql_page)
         elif current_step == "PASSKEY":
+            passkey_retries = state_retry_counts.get("PASSKEY", 0)
+            if passkey_retries > 5:
+                logger.error("🛑 Passkey loop limit (5) exceeded — navigating away")
+                cleanup_webauthn_bypass(page)
+                try:
+                    page.goto("https://outlook.live.com/mail/0/inbox", wait_until="domcontentloaded", timeout=15000)
+                    time.sleep(2)
+                except Exception:
+                    pass
+                continue
             success = handle_passkey_step(page, device, agentql_page)
         elif current_step == "PRIVACY":
             success = handle_privacy_step(page, device, agentql_page)
@@ -303,6 +332,7 @@ def run_outlook_signup_with_identity(page, device, pre_generated_identity: dict)
             return "RETRY"
         elif current_step == "SUCCESS":
             logger.success(f"🎉 Outlook Account Created: {identity['email_handle']}@outlook.com")
+            cleanup_webauthn_bypass(page)
             try:
                 with open("created_hotmails.txt", "a") as f:
                     f.write(f"{identity['email_handle']}@outlook.com:{identity['password']}\n")

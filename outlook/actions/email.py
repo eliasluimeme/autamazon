@@ -24,6 +24,180 @@ from amazon.outlook.utils.xpath_cache import (
 )
 
 
+def _is_split_mode(page) -> bool:
+    """
+    Detect if the email form is in 'split mode' (handle input + domain dropdown).
+
+    On desktop, the signup form at signup.live.com shows a text input for the
+    handle and a SEPARATE dropdown for the domain (@outlook.com / @hotmail.com).
+    Typing the full email (handle@outlook.com) into the handle-only input
+    triggers a format error.
+
+    Detection strategy (broadest first):
+      1. JavaScript DOM inspection — look for any visible element showing
+         '@outlook.com' or '@hotmail.com' that is NOT the email input itself.
+      2. CSS selector fallback for known dropdown IDs.
+      3. Page-content string search.
+    """
+    # ── Method 1: JS DOM evaluation (most robust) ────────────────────────
+    try:
+        result = page.evaluate("""() => {
+            const input = document.querySelector('#MemberName, input[name="MemberName"]');
+            if (!input) return false;
+            const inputVal = (input.value || '').toLowerCase();
+
+            // Scan select elements for domain options
+            const selects = document.querySelectorAll('select');
+            for (const sel of selects) {
+                for (const opt of sel.options) {
+                    const t = (opt.text || opt.value || '').toLowerCase();
+                    if (t.includes('@outlook') || t.includes('@hotmail')) return true;
+                }
+            }
+
+            // Scan buttons / comboboxes / dropdowns for domain text
+            const candidates = document.querySelectorAll(
+                'button, [role="combobox"], [role="listbox"], [role="option"]'
+            );
+            for (const el of candidates) {
+                if (el === input) continue;
+                const t = (el.textContent || '').trim().toLowerCase();
+                if (t.includes('@outlook.com') || t.includes('@hotmail.com')) return true;
+            }
+
+            // Check the form container for visible @domain text
+            // (walk up a few parents from the input)
+            let container = input.parentElement;
+            for (let i = 0; i < 6 && container; i++) {
+                const kids = container.children;
+                for (const kid of kids) {
+                    if (kid === input || kid.contains(input)) continue;
+                    const t = (kid.innerText || '').toLowerCase();
+                    if (t.includes('@outlook.com') || t.includes('@hotmail.com')) return true;
+                }
+                container = container.parentElement;
+            }
+
+            return false;
+        }""")
+        if result:
+            logger.debug("Split mode detected via JS DOM evaluation")
+            return True
+    except Exception as e:
+        logger.debug(f"JS split-mode detection error: {e}")
+
+    # ── Method 2: CSS selector for known dropdown IDs ────────────────────
+    try:
+        domain_dd = page.locator(SELECTORS["email"]["domain_dropdown"]).first
+        if domain_dd.is_visible(timeout=600):
+            logger.debug("Split mode detected via domain dropdown selector")
+            return True
+    except Exception:
+        pass
+
+    # ── Method 3: Page-content string search ─────────────────────────────
+    try:
+        content = page.content()
+        markers = [
+            'LiveDomainBoxList', 'DomainBoxList', 'domainBox',
+            '@outlook.com</option', '@hotmail.com</option',
+            'aria-label="domain"', 'aria-label="Domain"',
+        ]
+        if any(m in content for m in markers):
+            logger.debug("Split mode detected via page content")
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
+def _check_and_handle_format_error(page, identity: dict, device) -> bool:
+    """
+    Detect the email format error ('Enter your email address in the format:
+    someone@example.com') that occurs on desktop when the full email
+    (handle@outlook.com) is typed into the split-mode handle-only input.
+
+    If detected:
+      1. Clear the input
+      2. Re-type ONLY the handle (without @outlook.com)
+      3. Click Next
+      4. Return True so the caller knows the error was recovered
+
+    Returns:
+        True  — format error was detected AND successfully recovered
+        False — no format error found (caller should proceed normally)
+    """
+    format_error_found = False
+
+    # Method 1: Check error element
+    try:
+        error_el = page.locator(SELECTORS["email"]["format_error"]).first
+        if error_el.is_visible(timeout=800):
+            error_text = error_el.inner_text(timeout=500).lower()
+            if "format" in error_text or "someone@example" in error_text or "email address" in error_text:
+                format_error_found = True
+    except Exception:
+        pass
+
+    # Method 2: Check page content for error text
+    if not format_error_found:
+        try:
+            content = page.content().lower()
+            if ("enter your email address in the format" in content
+                    or "someone@example.com" in content):
+                format_error_found = True
+        except Exception:
+            pass
+
+    # Method 3: Check if the input value contains '@' while in split mode
+    # (the typed value shouldn't contain '@' in split mode)
+    if not format_error_found:
+        try:
+            email_input = page.locator(SELECTORS["email"]["input"]).first
+            if email_input.is_visible(timeout=500):
+                val = email_input.input_value()
+                if "@" in val and _is_split_mode(page):
+                    logger.debug(f"Input contains '@' in split mode (value: {val})")
+                    format_error_found = True
+        except Exception:
+            pass
+
+    if not format_error_found:
+        return False
+
+    logger.warning("⚠️ Email format error detected (typed full email in split-mode input). Recovering...")
+
+    try:
+        email_input = page.locator(SELECTORS["email"]["input"]).first
+        if not email_input.is_visible(timeout=1500):
+            logger.error("Cannot find email input to recover from format error")
+            return False
+
+        # Clear and retype handle only
+        email_input.fill("")
+        time.sleep(0.3)
+        handle = identity["email_handle"]
+        logger.info(f"Re-typing handle only: {handle}")
+        device.type_text(email_input, handle, "email input (format-error recovery)")
+        time.sleep(random.uniform(*DELAYS["after_input"]))
+
+        # Click Next
+        next_btn = page.locator(SELECTORS["email"]["next_button"]).first
+        if next_btn.is_visible(timeout=2000):
+            device.js_click(next_btn, "next button (format-error recovery)")
+            time.sleep(2)
+
+            # Check if username was taken after recovery
+            _check_and_handle_username_taken(page, identity, device)
+            time.sleep(random.uniform(*DELAYS["step_transition"]))
+            return True
+    except Exception as e:
+        logger.error(f"Format error recovery failed: {e}")
+
+    return False
+
+
 def handle_email_step(page, identity: dict, device, agentql_page=None, retry_count: int = 0) -> bool:
     """
     Handle the email input step.
@@ -103,6 +277,11 @@ def _handle_via_cache(page, identity: dict, device, retry_count: int) -> bool:
             except Exception:
                 pass
 
+        # Even if we didn't click the link, the form may already be in split
+        # mode (e.g. retrying after "username taken"). Detect via dropdown.
+        if not is_split_mode:
+            is_split_mode = _is_split_mode(page)
+
         # Check for existing error and suggestions before typing
         if _check_and_handle_username_taken(page, identity, device):
             return True
@@ -133,6 +312,10 @@ def _handle_via_cache(page, identity: dict, device, retry_count: int) -> bool:
         if next_btn:
             device.js_click(next_btn, "next button (cached)")
             time.sleep(2)
+
+            # Check for email format error (full email typed in split-mode input)
+            if _check_and_handle_format_error(page, identity, device):
+                return True
 
             if _check_and_handle_username_taken(page, identity, device):
                 return True
@@ -166,6 +349,11 @@ def _handle_via_selectors(page, identity: dict, device, retry_count: int) -> boo
     except Exception:
         pass
 
+    # Even if we didn't click the link, the form may already be in split
+    # mode (e.g. retrying after "username taken"). Detect via dropdown.
+    if not is_split_mode:
+        is_split_mode = _is_split_mode(page)
+
     # Check for existing error and suggestions before typing
     if _check_and_handle_username_taken(page, identity, device):
         return True
@@ -194,6 +382,8 @@ def _handle_via_selectors(page, identity: dict, device, retry_count: int) -> boo
             if next_btn.is_visible(timeout=2000):
                 device.js_click(next_btn, "next button")
                 time.sleep(2)
+                if _check_and_handle_format_error(page, identity, device):
+                    return True
                 if _check_and_handle_username_taken(page, identity, device):
                     return True
                 time.sleep(random.uniform(*DELAYS["step_transition"]))
@@ -217,6 +407,10 @@ def _handle_via_selectors(page, identity: dict, device, retry_count: int) -> boo
 
         # Wait and check for error/suggestions
         time.sleep(2)
+
+        # Check for email format error (full email typed in split-mode input)
+        if _check_and_handle_format_error(page, identity, device):
+            return True
 
         # Check if username was taken and handle
         if _check_and_handle_username_taken(page, identity, device):
@@ -257,6 +451,10 @@ def _handle_via_agentql(page, agentql_page, identity: dict, device) -> bool:
             response = agentql_page.query_elements(EMAIL_STEP_QUERY)
         except Exception:
             pass
+
+    # Even if we didn't click the link, detect split mode via dropdown
+    if not is_split_mode:
+        is_split_mode = _is_split_mode(page)
 
     if not response.email_input:
         logger.warning("AgentQL could not find email input")

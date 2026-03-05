@@ -105,17 +105,34 @@ def run_outlook_login(page, device, identity: dict):
             
         elif current_step == "ERROR":
             error_count = state_retry_counts.get("ERROR", 0)
-            if error_count < 1:
-                logger.warning("🛑 Network error detected. Attempting page reload...")
+            
+            if error_count < 2:
+                logger.warning(
+                    f"🛑 Error page detected (attempt {error_count + 1}/2). "
+                    f"Closing tab and opening fresh one..."
+                )
                 try:
                     previous_step = "ERROR"
-                    page.reload(wait_until="domcontentloaded", timeout=30000)
-                    time.sleep(3)
+                    # Close broken tab, open a fresh one
+                    context = page.context
+                    if not page.is_closed():
+                        page.close()
+                    page = context.new_page()
+                    device.page = page
+                    # Re-wrap AgentQL
+                    try:
+                        agentql_page = agentql.wrap(page)
+                    except Exception:
+                        agentql_page = None
+                    # Navigate fresh
+                    page.goto(OUTLOOK_LOGIN_URL, wait_until="domcontentloaded", timeout=45000)
+                    time.sleep(DELAYS["page_load"][0])
+                    logger.info("✅ Fresh tab opened and navigated to login.")
                     continue
                 except Exception as e:
-                    logger.error(f"Reload failed: {e}")
+                    logger.error(f"Tab recycle failed: {e}")
             
-            logger.error("🛑 Outlook error page persists or reload failed. Requesting full retry...")
+            logger.error("🛑 Outlook error page persists after tab recycle. Requesting full retry...")
             return "RETRY"
             
         elif current_step == "SUCCESS":

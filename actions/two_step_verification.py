@@ -86,16 +86,77 @@ def _do_otp_submission(page, interaction, otp_code) -> bool:
 def detect_2fa_state(page) -> str:
     """Detect current state of the 2FA activation flow."""
     url = page.url.lower()
+    logger.debug(f"2FA state detection — URL: {url[:120]}")
+    
+    # 0. SETUP/REGISTER page — check this FIRST so it's never mistaken for success
+    #    The setup page also shows headings like "Two-Step Verification (2SV) Settings"
+    #    which would falsely trigger the success check if we didn't guard against it.
+    if "setup/register" in url:
+        # Check if we are on the "Enroll/Verify OTP" sub-page where secret is NOT visible (retry/resume case)
+        has_otp_field = _safe_is_visible(page.locator("#ch-auth-app-code-input, #sia-totp-code, input[name='code']"), timeout=500)
+        has_verify_btn = _safe_is_visible(page.locator("button:has-text('Verify OTP and continue')"), timeout=500)
+        
+        if has_otp_field and has_verify_btn and not _safe_is_visible(page.locator("#sia-otp-accordion-totp-header"), timeout=300):
+            return "verify_totp_retry"
+        
+        return "setup_form"
     
     # 1. SUCCESS (Final)
-    # 2FA is on when we see 'is on', 'current status is on', or the 'Disable' button on the settings page
-    is_success_url = "success" in url 
-    has_success_text = _safe_is_visible(page.get_by_text("is on"), timeout=500) or \
-                       _safe_is_visible(page.get_by_text("Current status is on"), timeout=500) or \
-                       _safe_is_visible(page.get_by_text("Two-Step Verification (2SV) Settings"), timeout=500) or \
+    # 2FA is confirmed via URL indicators or page content on the SETTINGS page
+    
+    # URL-based success: "enable-succeeded" alert or explicit success page
+    is_success_url = "enable-succeeded" in url or \
+                     ("success" in url and "setup" not in url)
+    
+    if is_success_url:
+        logger.info(f"✅ 2FA success detected via URL: {url[:100]}")
+        return "success"
+    
+    # Settings page: /a/settings/approval (WITHOUT /setup/) — this is the 2FA management page
+    # When 2FA is already enabled, navigating to setup/register redirects here
+    is_settings_page = "/settings/approval" in url and "/setup/" not in url
+    
+    if is_settings_page:
+        # Check for success indicators with broader selectors (works on mobile too)
+        disable_btn_visible = _safe_is_visible(page.locator("button:has-text('Disable')"), timeout=1500) or \
+                              _safe_is_visible(page.locator("[role='button']:has-text('Disable')"), timeout=500) or \
+                              _safe_is_visible(page.locator("a:has-text('Disable')"), timeout=500) or \
+                              _safe_is_visible(page.locator("input[value='Disable']"), timeout=500)
+        
+        has_2sv_heading = _safe_is_visible(page.get_by_text("Two-Step Verification (2SV) Settings"), timeout=1000) or \
+                          _safe_is_visible(page.get_by_text("Two-Step Verification", exact=False), timeout=500)
+        
+        has_enabled_text = _safe_is_visible(page.get_by_text("Enabled"), timeout=500) or \
+                           _safe_is_visible(page.get_by_text("Current status is on"), timeout=500) or \
+                           _safe_is_visible(page.get_by_text("is on"), timeout=500)
+        
+        if disable_btn_visible or (has_2sv_heading and has_enabled_text):
+            logger.info("✅ 2FA success detected via settings page content")
+            return "success"
+        
+        # Even if we can't find exact text, this IS the settings page.
+        # If we're here and it's not a setup URL, 2FA is very likely already on.
+        # Return a specific state so the caller can verify instead of looping as "unknown"
+        logger.info("📋 On 2FA settings page — checking via JS...")
+        try:
+            page_text = page.inner_text("body", timeout=3000).lower()
+            if "disable" in page_text or "enabled" in page_text or "is on" in page_text or "authenticator app" in page_text:
+                logger.info("✅ 2FA success confirmed via page text content")
+                return "success"
+        except Exception:
+            pass
+        
+        # Still on settings page but can't confirm — return settings state, NOT unknown
+        return "success_likely"
+    
+    # Text-based success (fallback for other URLs)
+    has_success_text = _safe_is_visible(page.get_by_text("Current status is on"), timeout=500) or \
+                       (_safe_is_visible(page.get_by_text("Two-Step Verification (2SV) Settings"), timeout=500) and \
+                        (_safe_is_visible(page.get_by_text("is on"), timeout=500) or \
+                         _safe_is_visible(page.locator("button:has-text('Disable')"), timeout=500))) or \
                        (_safe_is_visible(page.get_by_text("Enabled"), timeout=500) and _safe_is_visible(page.locator("button:has-text('Disable')"), timeout=500))
     
-    if is_success_url or has_success_text:
+    if has_success_text:
         return "success"
         
     # 2. OTP VERIFICATION (Needs email OTP)
@@ -119,17 +180,7 @@ def detect_2fa_state(page) -> str:
        _safe_is_visible(page.get_by_text("Proceed"), timeout=500):
         return "security_check"
         
-    # 5. 2FA SETUP STAGES
-    if "setup/register" in url:
-        # Check if we are on the "Enroll/Verify OTP" sub-page where secret is NOT visible (retry/resume case)
-        has_otp_field = _safe_is_visible(page.locator("#ch-auth-app-code-input, #sia-totp-code, input[name='code']"), timeout=500)
-        has_verify_btn = _safe_is_visible(page.locator("button:has-text('Verify OTP and continue')"), timeout=500)
-        
-        if has_otp_field and has_verify_btn and not _safe_is_visible(page.locator("#sia-otp-accordion-totp-header"), timeout=500):
-            return "verify_totp_retry"
-        
-        return "setup_form"
-        
+    # 5. 2FA SETUP STAGES (setup/register URL already handled at top of function)
     if _safe_is_visible(page.locator("#sia-otp-accordion-totp-header"), timeout=500):
         return "setup_form"
         
@@ -169,6 +220,8 @@ def run_2fa_setup_flow(playwright_page, session: SessionState, device) -> bool:
         # Immediate navigation as requested
         logger.info(f"Navigating to 2FA Setup: {TWO_SV_REGISTER_URL}")
         playwright_page.goto(TWO_SV_REGISTER_URL, wait_until="domcontentloaded")
+        # Allow page to stabilize after navigation (prevents false state detection)
+        time.sleep(2)
         
     except Exception as e:
         logger.warning(f"Could not recycle tab for 2FA: {e}")
@@ -198,15 +251,28 @@ def run_2fa_setup_flow(playwright_page, session: SessionState, device) -> bool:
         state = detect_2fa_state(playwright_page)
         logger.info(f"🔒 2FA Flow State: {state}")
         
-        if state == "success":
+        if state == "success" or state == "success_likely":
+            if state == "success_likely":
+                logger.info("🔒 On 2FA settings page — treating as success (2FA is on)")
             logger.success("✅ 2FA already enabled or activation confirmed!")
             session.update_flag("2fa_enabled", True)
             return True
             
         elif state == "unknown":
+            # Before blindly navigating, check if session already flagged 2FA as enabled
+            # This prevents infinite loops when setup/register redirects to the settings page
+            if session.completion_flags.get("2fa_enabled", False):
+                logger.success("✅ 2FA was already flagged as enabled in session — confirming success")
+                return True
             logger.info(f"Ensuring navigation to: {TWO_SV_REGISTER_URL}")
             playwright_page.goto(TWO_SV_REGISTER_URL, wait_until="domcontentloaded")
             time.sleep(3)
+            # After navigation, check if we were redirected to the settings page (2FA already on)
+            current_url = playwright_page.url.lower()
+            if "/settings/approval" in current_url and "/setup/" not in current_url:
+                logger.info("🔄 setup/register redirected to settings page — 2FA is already enabled")
+                session.update_flag("2fa_enabled", True)
+                return True
             
         elif state == "reauth_prompt":
             logger.info("🔐 Re-authentication required...")

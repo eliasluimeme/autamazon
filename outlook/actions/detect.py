@@ -67,12 +67,84 @@ def detect_current_step(page, agentql_page=None) -> str:
 
 
 def _is_network_error(page) -> bool:
-    """Detect if we are on a browser error page."""
+    """Detect if we are on a browser error page OR a Microsoft error page."""
     try:
         # Check for specific network error codes in title or body
         title = page.title().lower()
         if "site can't be reached" in title or "error" in title:
             return True
+        
+        # --- Microsoft "Something went wrong" error page detection ---
+        # Microsoft sometimes serves their own styled error page at signup.live.com
+        # instead of a browser-level network error. Detect it early.
+        # IMPORTANT: Must NOT false-positive on passkey/interruption pages which
+        # also contain "something went wrong" text (e.g. "Something went wrong
+        # trying to create a passkey").
+        try:
+            url = page.url.lower()
+            is_microsoft_domain = any(d in url for d in (
+                "signup.live.com", "login.live.com", "account.live.com",
+                "login.microsoftonline.com", "account.microsoft.com",
+            ))
+            if is_microsoft_domain:
+                # Skip error detection entirely if URL indicates a known flow page
+                # (passkey, interruption, FIDO, privacy, proofs, etc.)
+                known_flow_urls = (
+                    "passkey", "interrupt", "fido", "privacynotice",
+                    "proofs", "identity", "signup",
+                )
+                if any(kw in url for kw in known_flow_urls):
+                    pass  # Not an error page — it's a known flow step
+                else:
+                    page_content = page.content()
+                    page_text = page_content.lower()
+                    
+                    # Skip if page contains passkey/interruption-specific content
+                    # These pages legitimately use words like "something went wrong"
+                    passkey_exclusions = [
+                        "create a passkey", "passkey", "go passwordless",
+                        "setting up your", "stay signed in",
+                    ]
+                    is_passkey_page = any(p in page_text for p in passkey_exclusions)
+                    
+                    if not is_passkey_page:
+                        # Microsoft GENERIC error page patterns (not reused by other flows)
+                        ms_error_patterns = [
+                            "something went wrong",
+                            "we can't complete this action",
+                            "this service is not available",
+                            "service unavailable",
+                            "temporarily unavailable",
+                            "we're having trouble",
+                            "an error occurred",
+                            "our services aren't available right now",
+                        ]
+                        has_error_text = any(p in page_text for p in ms_error_patterns)
+                        if has_error_text:
+                            # Final guard: no form inputs present (not an inline form error)
+                            has_form = any(tag in page_text for tag in (
+                                'id="membername"', 'id="passwordinput"',
+                                'id="firstname"', 'id="birthyear"',
+                                'name="membername"', 'name="passwd"',
+                                'type="email"', 'type="password"',
+                            ))
+                            if not has_form:
+                                logger.warning(
+                                    f"🛑 Microsoft error page detected: "
+                                    f"{[p for p in ms_error_patterns if p in page_text]}"
+                                )
+                                return True
+        except Exception:
+            pass
+        
+        # --- URL-based error detection ---
+        try:
+            url = page.url.lower()
+            if "error.aspx" in url or "errcode=" in url:
+                logger.warning(f"🛑 Microsoft error URL detected: {url}")
+                return True
+        except Exception:
+            pass
         
         # Check for common error page elements (Chromium)
         error_indicators = [
@@ -81,7 +153,9 @@ def _is_network_error(page) -> bool:
             "text=ERR_TUNNEL_CONNECTION_FAILED",
             "text=ERR_CONNECTION_REFUSED",
             "text=ERR_NAME_NOT_RESOLVED",
-            "text=ERR_CONNECTION_TIMED_OUT"
+            "text=ERR_CONNECTION_TIMED_OUT",
+            "text=ERR_PROXY_CONNECTION_FAILED",
+            "text=ERR_SSL_PROTOCOL_ERROR",
         ]
         for sel in error_indicators:
             try:
@@ -106,7 +180,31 @@ def _is_network_error(page) -> bool:
 def _detect_via_cache(page) -> str:
     """Detect step using cached XPaths + CSS from data/xpath_cache/outlook_selectors.json."""
     
+    # ── CRITICAL: URL-based passkey detection FIRST ──────────────────────
+    # The passkey error page has a button[type='submit'] ("Try again") that
+    # falsely matches the stay_signed_in_yes cached CSS. We must detect
+    # passkey URLs before any element-based cache checks.
+    try:
+        url = page.url.lower()
+        if any(p in url for p in ("interrupt", "passkey", "fido/create", "fido/enroll")):
+            logger.debug(f"Step detected via cache (URL pre-check): PASSKEY — {url}")
+            return "PASSKEY"
+    except Exception:
+        pass
+    
+    # ── CRITICAL: Content-based passkey detection ────────────────────────
+    # Catches passkey error pages that have already redirected away from fido URL
+    try:
+        content = page.content().lower()
+        if "couldn't create a passkey" in content or "setting up your passkey" in content:
+            logger.debug("Step detected via cache (content pre-check): PASSKEY")
+            return "PASSKEY"
+    except Exception:
+        pass
+    
     # Mapping of step names to their characteristic cache keys
+    # NOTE: PASSKEY is checked before STAY_SIGNED_IN to prevent
+    # button[type='submit'] on passkey pages matching stay_signed_in_yes
     indicator_keys = {
         "EMAIL": "email_input",
         "PASSWORD": "password_input",
@@ -114,14 +212,36 @@ def _detect_via_cache(page) -> str:
         "DOB": "dob_year",
         "CAPTCHA": "captcha_button",
         "PRIVACY": "privacy_ok_button",
-        "STAY_SIGNED_IN": "stay_signed_in_yes",
         "PASSKEY": "passkey_skip_button",
+        "STAY_SIGNED_IN": "stay_signed_in_yes",
     }
     
     # Check each step indicator using find_element (tries XPath then CSS)
     for step, key in indicator_keys.items():
         el = find_element(page, key, timeout=500)
         if el:
+            # Extra validation: if STAY_SIGNED_IN was detected, verify we're
+            # not on a passkey page where button[type='submit'] = "Try again"
+            if step == "STAY_SIGNED_IN":
+                try:
+                    cur_url = page.url.lower()
+                    if any(p in cur_url for p in ("passkey", "fido", "interruption")):
+                        logger.warning(
+                            f"Rejecting STAY_SIGNED_IN — URL indicates passkey page: {cur_url}"
+                        )
+                        return "PASSKEY"
+                    # Also check button text — if it says "Try again" it's NOT stay_signed_in
+                    try:
+                        btn_text = el.inner_text(timeout=300).strip().lower()
+                        if "try again" in btn_text:
+                            logger.warning(
+                                f"Rejecting STAY_SIGNED_IN — button text is '{btn_text}'"
+                            )
+                            return "PASSKEY"
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
             return step
                 
     return "UNKNOWN"
@@ -139,7 +259,7 @@ def _detect_via_selectors(page) -> str:
     try:
         # Check URL first for interruption (fast check)
         url = page.url.lower()
-        if "interruption" in url or "passkey" in url:
+        if "interrupt" in url or "passkey" in url or "fido/create" in url or "fido/enroll" in url:
             logger.info(f"Detected PASSKEY step via URL: {url}")
             return "PASSKEY"
         
@@ -310,6 +430,7 @@ def _detect_via_selectors(page) -> str:
             "signup",
             "proofs",
             "identity",
+            "fido",
         ]
         
         is_success_url = (
