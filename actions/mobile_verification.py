@@ -11,18 +11,23 @@ This step is optional - not all signups require it.
 
 import time
 import random
+import re
 from loguru import logger
 
 from amazon.device_adapter import DeviceAdapter
+from modules.onlinesim_handler import OnlineSimHandler
+import config
 
 
 def handle_add_mobile_step(page, phone_number: str = None, device: DeviceAdapter = None) -> bool:
     """
     Handle the Add Mobile Number step.
+    If phone_number is provided AND automated verification is possible via OnlineSim,
+    it will use OnlineSim. Otherwise fallbacks or skips.
     
     Args:
         page: Playwright page object
-        phone_number: Phone number to enter (if None, will skip/decline)
+        phone_number: Optional phone number (if None, will rent one from OnlineSim)
         device: DeviceAdapter for human-like interactions
         
     Returns:
@@ -33,9 +38,15 @@ def handle_add_mobile_step(page, phone_number: str = None, device: DeviceAdapter
     
     logger.info("📱 Handling Add Mobile Number step...")
     
+    # 1. Check if we have OnlineSim API key
+    if config.ONLINESIM_API_KEY:
+        logger.info("🤖 Automated OnlineSim verification available.")
+        return handle_automated_mobile_verification(page, device)
+    
+    # 2. Manual/Static Fallback (Existing logic)
     # If no phone number provided, try to skip this step
     if not phone_number:
-        logger.info("No phone number provided, attempting to skip...")
+        logger.info("No phone number provided and no OnlineSim API, attempting to skip...")
         return _try_skip_mobile_step(page, device)
     
     # Step 1: Enter the phone number
@@ -47,8 +58,151 @@ def handle_add_mobile_step(page, phone_number: str = None, device: DeviceAdapter
     logger.warning("📱 Phone OTP verification required - MANUAL INTERVENTION NEEDED")
     logger.warning("👉 Please check your phone for the OTP and enter it manually.")
     
-    # For now, we wait for manual OTP entry
     return _wait_for_mobile_verification(page)
+
+
+def handle_automated_mobile_verification(page, device: DeviceAdapter, max_retries: int = None) -> bool:
+    """
+    Automated flow using OnlineSim API.
+    """
+    if max_retries is None:
+        max_retries = config.ONLINESIM_RETRY_COUNT
+        
+    handler = OnlineSimHandler()
+    
+    for attempt in range(max_retries):
+        logger.info(f"🔄 Automated Mobile Verification - Attempt {attempt + 1}/{max_retries}")
+        
+        # 1. Rent a number
+        tzid, number = handler.rent_number()
+        if not tzid or not number:
+            logger.error("Failed to rent a number from OnlineSim. Skipping automation.")
+            break
+            
+        # 2. Enter the number
+        # Note: Amazon might expect + prefix or dialing code separately.
+        # _enter_phone_number handles the input field.
+        if not _enter_phone_number(page, number, device):
+            logger.warning(f"Could not enter number {number}. Closing and retrying...")
+            handler.close_number(tzid)
+            continue
+            
+        # 3. Check for immediate Amazon errors (number already used, invalid, etc.)
+        error_msg = _check_amazon_phone_error(page)
+        if error_msg:
+            logger.warning(f"❌ Amazon rejected number {number}: {error_msg}")
+            handler.close_number(tzid)
+            # Short wait before retry to avoid rate limiting
+            time.sleep(2)
+            continue
+            
+        # 4. Wait for SMS
+        otp_code = handler.get_sms(tzid)
+        if not otp_code:
+            logger.warning(f"⏰ Did not receive SMS for {number}. Closing and retrying...")
+            handler.close_number(tzid)
+            continue
+            
+        # 5. Enter OTP code
+        if _enter_otp_code(page, device, otp_code):
+            logger.success(f"✅ Mobile verification successful with number {number}!")
+            handler.close_number(tzid)
+            return True
+        else:
+            logger.error(f"❌ Failed to submit OTP {otp_code} for {number}.")
+            handler.close_number(tzid)
+            # This might be due to invalid OTP or Amazon error after entry
+            error_msg = _check_amazon_phone_error(page)
+            if error_msg:
+                logger.error(f"Amazon error after OTP: {error_msg}")
+            
+    logger.error("❌ Automated mobile verification failed after all retries.")
+    return _try_skip_mobile_step(page, device)
+
+
+def _check_amazon_phone_error(page) -> str | None:
+    """Check for error messages on the Amazon phone/OTP entry page."""
+    error_selectors = [
+        ".a-alert-error",
+        "#auth-error-message-box",
+        ".cvf-widget-alert",
+        "div[role='alert']",
+        ".a-box-error"
+    ]
+    
+    # Common error strings:
+    # "This phone number is already in use."
+    # "The mobile phone number you entered is invalid."
+    # "Please enter a valid mobile phone number."
+    # "Invalid OTP. Please check your phone for the verification code."
+    
+    for selector in error_selectors:
+        try:
+            loc = page.locator(selector).first
+            if loc.is_visible(timeout=1000):
+                text = loc.inner_text().strip()
+                if text:
+                    return text
+        except:
+            continue
+            
+    return None
+
+
+def _enter_otp_code(page, device: DeviceAdapter, otp_code: str) -> bool:
+    """Enter the OTP code for phone verification."""
+    otp_selectors = [
+        "input[name='cvf_phone_otp']",
+        "input[name='code']",
+        "#cvf-phone-otp-input",
+        "input[type='text'][maxlength='6']",
+        "input[aria-label*='Code']",
+        "input[placeholder*='code']"
+    ]
+    
+    for selector in otp_selectors:
+        try:
+            input_el = page.locator(selector).first
+            if input_el.is_visible(timeout=2000):
+                logger.info(f"Filling phone OTP with: {selector}")
+                input_el.fill("")
+                time.sleep(0.2)
+                device.type_text(input_el, otp_code, "phone OTP")
+                time.sleep(0.5)
+                
+                # Click verify button
+                return _click_verify_otp_button(page, device)
+        except:
+            continue
+            
+    logger.error("Could not find OTP input field for phone verification")
+    return False
+
+
+def _click_verify_otp_button(page, device: DeviceAdapter) -> bool:
+    """Click the button to verify phone OTP."""
+    button_selectors = [
+        "input[name='cvf_action_proceed']",
+        "input[type='submit'][value='Verify']",
+        "button:has-text('Verify')",
+        "#cvf-submit-otp-button",
+        "input[name='cvf_phone_num_verify']"
+    ]
+    
+    for selector in button_selectors:
+        try:
+            btn = page.locator(selector).first
+            if btn.is_visible(timeout=1000):
+                logger.info(f"Clicking phone OTP verify button with: {selector}")
+                device.scroll_to_element(btn, "Verify OTP button")
+                time.sleep(0.4)
+                btn.click()
+                time.sleep(3)
+                return True
+        except:
+            continue
+            
+    return False
 
 
 def _try_skip_mobile_step(page, device: DeviceAdapter) -> bool:

@@ -127,7 +127,7 @@ def _best_effort_name(name: str) -> str:
 class AmazonCaptchaSolver:
     """Minimal, efficient CAPTCHA solver tuned for Amazon CVF puzzles."""
 
-    MAX_ATTEMPTS = 5
+    MAX_ATTEMPTS = 10
     GRID_SIZE = 3  # 3×3
 
     def __init__(self, page, device=None):

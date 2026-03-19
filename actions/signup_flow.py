@@ -140,7 +140,7 @@ def run_signup_flow(playwright_page, session: SessionState, device) -> bool:
         # 6. Add Mobile Number
         elif state == "add_mobile":
             from amazon.actions.mobile_verification import handle_add_mobile_step
-            logger.info("📱 Skipping optional mobile number step...")
+            logger.info("📱 Handling Add Mobile Number step...")
             handle_add_mobile_step(playwright_page, identity.phone, device)
             time.sleep(2)
             continue

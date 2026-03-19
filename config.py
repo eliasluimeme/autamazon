@@ -129,3 +129,14 @@ ELEMENT_WAIT_TIMEOUT = 10000     # Milliseconds to wait for element
 SKIP_SPONSORED_COUNT = 2
 # Max products to consider when selecting randomly
 MAX_PRODUCTS_TO_CONSIDER = 10
+
+# === OnlineSim Configuration ===
+import os
+from dotenv import load_dotenv
+load_dotenv()
+
+ONLINESIM_API_KEY = os.getenv("ONLINESIM_API_KEY")
+ONLINESIM_DEFAULT_COUNTRY = int(os.getenv("ONLINESIM_COUNTRY", "1"))  # Default to US
+ONLINESIM_RETRY_COUNT = 3
+ONLINESIM_SMS_TIMEOUT = 120
+ONLINESIM_POLL_INTERVAL = 5
