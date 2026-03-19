@@ -653,6 +653,42 @@ IMPORTANT:
             return self._nopecha_awscaptcha_audio(element, info)
         return False
 
+    def _interact_with_captcha_input(self, text: str) -> bool:
+        """Type solve into input field and click confirm, scanning frames."""
+        selectors = [
+            "input[type='text']",
+            "#cvf-a11y-audio-input",
+            ".cvf-widget-input",
+            "input[name='cvf_a11y_captcha_input']",
+        ]
+        
+        # 1. Find and fill input
+        filled = False
+        for frame in [self.page] + self.page.frames:
+            for sel in selectors:
+                try:
+                    inp = frame.locator(sel).first
+                    if inp.count() > 0:
+                        # Focus + Fill + Pulse (for JS listeners)
+                        inp.focus(timeout=1000)
+                        inp.fill(text)
+                        inp.press("Enter", timeout=1000)
+                        logger.info(f"Filled input via {sel} in {frame.url[:40]}")
+                        filled = True
+                        break
+                except Exception:
+                    continue
+            if filled: break
+        
+        if not filled:
+            logger.warning("Could not find any captcha input field to fill")
+            return False
+
+        # 2. Click Confirm
+        time.sleep(random.uniform(0.5, 1.0))
+        self._click_confirm()
+        return True
+
     def _nopecha_awscaptcha_audio(self, element, info: Dict) -> bool:
         """Solve AWS WAF Audio using Nopecha Recognition API (Two-step: POST -> POLL)."""
         try:
@@ -698,14 +734,10 @@ IMPORTANT:
                     if text_result and text_result != "pending":
                         logger.success(f"Nopecha Audio solved: {text_result}")
                         
-                        # Type into input field
-                        input_sel = "input[type='text'], #cvf-a11y-audio-input, .cvf-widget-input"
-                        inp = self.page.locator(input_sel).first
-                        if inp.count() > 0:
-                            inp.fill(text_result)
-                            time.sleep(random.uniform(0.5, 1.0))
-                            self._click_confirm()
+                        # Use robust interaction helper
+                        if self._interact_with_captcha_input(text_result):
                             return True
+                        return False
 
                 logger.debug(f"Poll {i+1}/{max_polls}: still pending...")
             
@@ -1097,24 +1129,39 @@ IMPORTANT:
                 except Exception:
                     continue
 
-        # Then try main page
         confirm_selectors = [
             "button:has-text('Confirm')",
             "button:has-text('Verify')",
             "button:has-text('Next')",
             "button:has-text('Skip')",
             "input[type='submit']",
+            "button.cvf-widget-btn-verify",
         ]
-        for sel in confirm_selectors:
-            try:
-                btn = self.page.locator(sel).first
-                if btn.is_visible(timeout=1000):
-                    time.sleep(random.uniform(0.3, 0.7))
-                    btn.click()
-                    logger.debug(f"Clicked confirm: {sel}")
-                    return
-            except Exception:
-                continue
+
+        # Scan main page and all frames
+        for frame in [self.page] + self.page.frames:
+            for sel in confirm_selectors:
+                try:
+                    btn = frame.locator(sel).first
+                    if btn.count() > 0:
+                        # Try JS click first for speed/avoid interception
+                        btn.evaluate("el => el.click()")
+                        logger.debug(f"Clicked confirm via JS: {sel} in {frame.url[:40]}")
+                        return
+                except Exception:
+                    continue
+            
+            # If JS failed or didn't exist, try native click for visible ones
+            for sel in confirm_selectors:
+                try:
+                    btn = frame.locator(sel).first
+                    if btn.is_visible(timeout=500):
+                        time.sleep(0.3)
+                        btn.click(force=True, timeout=1000)
+                        logger.debug(f"Clicked confirm via Native: {sel} in {frame.url[:40]}")
+                        return
+                except Exception:
+                    continue
 
     # ═══════════════════════════════════════════════════════════════
     # Main solve loop

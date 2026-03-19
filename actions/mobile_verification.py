@@ -18,6 +18,21 @@ from amazon.device_adapter import DeviceAdapter
 from modules.onlinesim_handler import OnlineSimHandler
 import config
 
+# Mapping of OnlineSim country codes to ISO codes and names for Amazon
+COUNTRY_CODE_MAP = {
+    "1": "US",
+    "61": "AU",
+    "44": "GB",
+    "33": "FR",
+    "49": "DE",
+    "7": "RU",
+    "32": "BE",
+    "31": "NL",
+    "34": "ES",
+    "39": "IT",
+    "1": "CA", # Multiple countries share +1
+}
+
 
 def handle_add_mobile_step(page, phone_number: str = None, device: DeviceAdapter = None) -> bool:
     """
@@ -73,44 +88,48 @@ def handle_automated_mobile_verification(page, device: DeviceAdapter, max_retrie
     for attempt in range(max_retries):
         logger.info(f"🔄 Automated Mobile Verification - Attempt {attempt + 1}/{max_retries}")
         
-        # 1. Rent a number
-        tzid, number = handler.rent_number()
+        # 1. Get a number (Try activation first, it's cheaper)
+        tzid, number = handler.get_number(service="amazon")
+        is_rent = False
+        
+        if not tzid:
+            logger.info("Activation API failed, falling back to Rent API...")
+            tzid, number = handler.rent_number()
+            is_rent = True
+            
         if not tzid or not number:
-            logger.error("Failed to rent a number from OnlineSim. Skipping automation.")
+            logger.error("Failed to obtain a number from OnlineSim (both activation and rent failed).")
             break
             
         # 2. Enter the number
-        # Note: Amazon might expect + prefix or dialing code separately.
-        # _enter_phone_number handles the input field.
         if not _enter_phone_number(page, number, device):
             logger.warning(f"Could not enter number {number}. Closing and retrying...")
-            handler.close_number(tzid)
+            handler.close_number(tzid, is_rent=is_rent)
             continue
             
-        # 3. Check for immediate Amazon errors (number already used, invalid, etc.)
+        # 3. Check for immediate Amazon errors
         error_msg = _check_amazon_phone_error(page)
         if error_msg:
             logger.warning(f"❌ Amazon rejected number {number}: {error_msg}")
-            handler.close_number(tzid)
-            # Short wait before retry to avoid rate limiting
+            handler.close_number(tzid, is_rent=is_rent)
             time.sleep(2)
             continue
             
         # 4. Wait for SMS
-        otp_code = handler.get_sms(tzid)
+        otp_code, actual_number = handler.get_sms(tzid, is_rent=is_rent)
         if not otp_code:
             logger.warning(f"⏰ Did not receive SMS for {number}. Closing and retrying...")
-            handler.close_number(tzid)
+            handler.close_number(tzid, is_rent=is_rent)
             continue
             
         # 5. Enter OTP code
         if _enter_otp_code(page, device, otp_code):
             logger.success(f"✅ Mobile verification successful with number {number}!")
-            handler.close_number(tzid)
+            handler.close_number(tzid, is_rent=is_rent)
             return True
         else:
             logger.error(f"❌ Failed to submit OTP {otp_code} for {number}.")
-            handler.close_number(tzid)
+            handler.close_number(tzid, is_rent=is_rent)
             # This might be due to invalid OTP or Amazon error after entry
             error_msg = _check_amazon_phone_error(page)
             if error_msg:
@@ -241,7 +260,19 @@ def _try_skip_mobile_step(page, device: DeviceAdapter) -> bool:
 def _enter_phone_number(page, phone_number: str, device: DeviceAdapter) -> bool:
     """Enter the phone number in the input field."""
     
-    # Phone number input selectors
+    # 1. Select the correct country code first
+    target_country = str(config.ONLINESIM_DEFAULT_COUNTRY)
+    _select_country_code(page, target_country, device)
+    
+    # Clean the phone number (remove prefix if it matches target_country)
+    # OnlineSim numbers often include the prefix (e.g. 61412345678)
+    clean_number = phone_number
+    if clean_number.startswith(target_country):
+        clean_number = clean_number[len(target_country):]
+    elif clean_number.startswith("+" + target_country):
+        clean_number = clean_number[len(target_country)+1:]
+        
+    # 2. Phone number input selectors
     phone_input_selectors = [
         "input[name='cvf_phone_num']",
         "input[type='tel']",
@@ -262,8 +293,9 @@ def _enter_phone_number(page, phone_number: str, device: DeviceAdapter) -> bool:
                 phone_input.fill("")
                 time.sleep(0.2)
                 
-                # Type the phone number
-                device.type_text(phone_input, phone_number, "phone number")
+                # Type the cleaned phone number
+                logger.info(f"Typing cleaned number: {clean_number}")
+                device.type_text(phone_input, clean_number, "phone number")
                 time.sleep(0.5)
                 
                 # Click the Add/Continue button
@@ -279,22 +311,22 @@ def _click_add_mobile_button(page, device: DeviceAdapter) -> bool:
     """Click the 'Add mobile number' button."""
     
     button_selectors = [
+        "input[name='cvf_action_proceed']",
+        "input[type='submit']",
+        "button.cvf-widget-btn-verify",
         "button:has-text('Add mobile number')",
         "span:has-text('Add mobile number')",
-        "input[type='submit']",
-        "button:has-text('Continue')",
         "#cvf-submit-btn",
     ]
     
     for selector in button_selectors:
         try:
             btn = page.locator(selector).first
-            if btn.is_visible(timeout=500):
+            if btn.count() > 0:
                 logger.info(f"Clicking Add Mobile button with: {selector}")
-                device.scroll_to_element(btn, "Add Mobile button")
-                time.sleep(random.uniform(0.3, 0.6))
-                btn.click()
-                time.sleep(2)
+                # Try JS click first to avoid interception by popovers or overlays
+                btn.evaluate("el => el.click()")
+                time.sleep(3)
                 return True
         except:
             continue
@@ -374,6 +406,97 @@ def _wait_for_page_change(page, max_wait: int = 120) -> bool:
         time.sleep(2)
     
     return False
+
+
+def _select_country_code(page, country_code: str, device: DeviceAdapter) -> bool:
+    """
+    Select the country code in Amazon's dropdown.
+    country_code: e.g. "61" or "1"
+    """
+    try:
+        # 1. Check if dropdown is already open (look for the popover)
+        popover_selector = ".a-popover.a-dropdown, #a-popover-1"
+        is_open = page.locator(popover_selector).first.is_visible(timeout=500)
+        
+        if not is_open:
+            # Open the dropdown
+            # Use a more specific selector for the button itself if possible
+            dropdown_selectors = [
+                '#cvf_phone_cc_aui',
+                '//*[@id="cvf_phone_cc_aui"]/span/span',
+                '.a-dropdown-container span[data-action="a-dropdown-button"]'
+            ]
+            
+            opened = False
+            for sel in dropdown_selectors:
+                try:
+                    btn = page.locator(sel).first
+                    if btn.is_visible(timeout=1000):
+                        logger.info(f"Opening country code dropdown via {sel}...")
+                        # Try JS click to avoid interception
+                        btn.evaluate("el => el.click()")
+                        time.sleep(1)
+                        if page.locator(popover_selector).first.is_visible(timeout=2000):
+                            opened = True
+                            break
+                except:
+                    continue
+            
+            if not opened:
+                logger.warning("Could not open country code dropdown")
+                return False
+        else:
+            logger.info("Country code dropdown already open")
+            
+        # 2. Find and click the target country
+        iso_code = COUNTRY_CODE_MAP.get(str(country_code))
+        
+        # Strategy A: Data-value ISO match
+        if iso_code:
+            # We use a simpler selector to avoid syntax errors with nested quotes
+            # Look for li with class cvf-country-code-option where inner a has data-value containing ISO
+            iso_selectors = [
+                f'#cvf_phone_cc_native_11', # Direct ID if AU
+                f'li.cvf-country-code-option:has([data-value*="{iso_code}"])',
+                f'li:has([data-value*="{iso_code}"])',
+                f'.a-dropdown-item:has([data-value*="{iso_code}"])'
+            ]
+            
+            for sel in iso_selectors:
+                option = page.locator(sel).first
+                if option.count() > 0:
+                    logger.info(f"Selecting country {iso_code} via {sel}")
+                    # Use JS click as it's more reliable in popovers
+                    option.evaluate("el => el.click()")
+                    time.sleep(1)
+                    return True
+                
+        # Strategy B: Search by text containing +prefix
+        prefix = f"+{country_code}"
+        text_selectors = [
+            f"li:has-text('{prefix}')",
+            f"a:has-text('{prefix}')",
+            f"span:has-text('{prefix}')",
+            f"role=option >> text='+{country_code}'"
+        ]
+        
+        for sel in text_selectors:
+            # Make sure we only click within the dropdown items
+            option = page.locator(f".a-popover {sel}, .cvf-country-code-option {sel}, .a-dropdown-item {sel}").first
+            if option.count() > 0:
+                logger.info(f"Selecting country via prefix {prefix} using {sel}")
+                option.evaluate("el => el.click()")
+                time.sleep(1)
+                return True
+                
+        logger.warning(f"Could not find country option for {country_code}")
+        # Close the dropdown if still open
+        page.keyboard.press("Escape")
+        return False
+        
+    except Exception as e:
+        logger.warning(f"Error selecting country code: {e}")
+        return False
 
 
 def is_add_mobile_page(page) -> bool:
