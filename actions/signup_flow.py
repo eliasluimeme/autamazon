@@ -151,10 +151,10 @@ def run_signup_flow(playwright_page, session: SessionState, device) -> bool:
             
             if state == "puzzle":
                 from amazon.actions.puzzle_solver import handle_puzzle_step
-                handle_puzzle_step(playwright_page)
+                handle_puzzle_step(playwright_page, device)
             elif state == "captcha":
-                from amazon.captcha_solver import handle_captcha
-                handle_captcha(playwright_page, device)
+                from captcha_solver import solve_captcha
+                solve_captcha(playwright_page, device)
             else:
                 # OTP
                 from amazon.actions.email_verification import handle_email_verification

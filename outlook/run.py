@@ -198,39 +198,36 @@ def run_outlook_signup(page, device):
 def run_outlook_signup_with_identity(page, device, pre_generated_identity: dict):
     """
     Run Outlook signup with a PRE-GENERATED identity (V3 optimization).
-    
-    This variant skips the identity generation step entirely, using
-    an identity that was pre-warmed by the IdentityPool before browser launch.
-    
-    The flow is identical to run_outlook_signup() except:
-    - No call to generate_outlook_identity()
-    - Identity is passed directly
-    - ~3-5s faster startup per profile
-    
-    Args:
-        page: Playwright page object
-        device: DeviceAdapter instance
-        pre_generated_identity: Dict with keys: firstname, lastname,
-            email_handle, password, dob_month, dob_day, dob_year
-        
-    Returns:
-        dict: Identity with credentials if successful, 
-              "RETRY" for retry signal, None on failure
     """
-    logger.info("🚀 Starting Outlook Signup Flow (pre-loaded identity)")
+    logger.info("➡️ run_outlook_signup_with_identity: Entry")
     
-    # Use the pre-generated identity directly — no generation delay!
     identity = pre_generated_identity
     logger.info(
         f"🆔 Using pre-warmed identity: {identity['firstname']} {identity['lastname']} "
         f"({identity['email_handle']})"
     )
     
-    # Pre-emptive WebAuthn bypass — prevents the native passkey dialog from appearing
-    setup_webauthn_bypass(page)
+    # 1. WebAuthn bypass
+    logger.debug("🔐 Attempting WebAuthn bypass setup...")
+    try:
+        from amazon.outlook.actions.passkey import setup_webauthn_bypass
+        setup_webauthn_bypass(page)
+        logger.debug("🔐 WebAuthn bypass setup complete")
+    except Exception as e:
+        logger.warning(f"⚠️ WebAuthn bypass failed: {e}")
     
-    # Navigate to Signup
-    logger.info(f"Navigating to {OUTLOOK_SIGNUP_URL}...")
+    # 2. AgentQL wrapping
+    logger.debug("🌐 Attempting AgentQL wrapping...")
+    agentql_page = None
+    try:
+        import agentql
+        agentql_page = agentql.wrap(page)
+        logger.debug("✅ AgentQL wrapping complete")
+    except Exception as e:
+        logger.warning(f"⚠️ AgentQL wrap failed: {e}")
+
+    # 3. Navigation
+    logger.info(f"🚀 Starting Outlook Signup Flow (pre-loaded identity). Navigating to {OUTLOOK_SIGNUP_URL}...")
     success_nav = False
     for attempt in range(3):
         try:

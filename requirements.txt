@@ -16,3 +16,8 @@ PhotoshopAPI
 psd-tools
 Pillow
 rembg[cpu]
+openai
+google-generativeai
+xai-sdk
+capsolver
+aiohttp

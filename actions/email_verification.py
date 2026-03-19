@@ -45,7 +45,8 @@ def handle_email_verification(browser_context, amazon_page, device, email: str, 
     # Step 0: Check for CAPTCHA first
     if _is_captcha_present(amazon_page):
         logger.warning("⚠️ CAPTCHA detected before OTP step!")
-        if not _handle_captcha_manual(amazon_page, max_wait=300):
+        from captcha_solver import solve_captcha
+        if not solve_captcha(amazon_page, device):
             logger.error("CAPTCHA not solved")
             return False
         # Re-check if we're now on OTP page

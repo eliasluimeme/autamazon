@@ -39,6 +39,19 @@ if root_dir not in sys.path:
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
+# --- Move all project-local imports to top to avoid import deadlocks in threads ---
+try:
+    from modules.opsec_workflow import OpSecBrowserManager
+    from amazon.device_adapter import DeviceAdapter
+    from amazon.core.session import SessionState
+    from amazon.outlook.run import run_outlook_signup_with_identity
+    from amazon.identity_manager import Identity
+    import agentql
+    logger.info("✅ All core modules pre-imported successfully")
+except Exception as e:
+    logger.error(f"❌ Failed to pre-import core modules: {e}")
+    # Don't exit here, let it fail gracefully in the pipeline if needed
+
 # ──────────────────────────────────────────────────────────────
 # LOG ROUTING via loguru.contextualize()
 # ──────────────────────────────────────────────────────────────
@@ -194,6 +207,7 @@ def _setup_profile_logging(profile_id: str, attempt: int = 1) -> int:
         filter=_make_profile_filter(profile_id),
         format="{time:HH:mm:ss.SSS} | {level: <8} | {module}:{function}:{line} | {message}",
         mode="w" if attempt == 1 else "a",  # Fresh file on first run, append on retries
+        encoding="utf-8",                   # Critical to prevent UnicodeEncodeError on some systems
     )
     _profile_log_handlers[profile_id] = handler_id
     return handler_id
@@ -273,10 +287,6 @@ def run_profile_pipeline(
             # ──────────────────────────────────────────────
             profile.transition_to(ProfileState.LAUNCHING, "Starting browser")
             logger.info("Launching browser...")
-            
-            from modules.opsec_workflow import OpSecBrowserManager
-            from amazon.device_adapter import DeviceAdapter
-            from amazon.core.session import SessionState
             
             manager = OpSecBrowserManager(profile_id)
             
@@ -628,11 +638,12 @@ def _run_outlook_with_preloaded_identity(manager, page, device, identity: Pooled
                 page = manager.context.new_page()
                 device.page = page
             
-            # Import the runner but PASS the pre-generated identity
-            from amazon.outlook.run import run_outlook_signup_with_identity
+            logger.info("📧 Handing over to Outlook signup runner...")
+            # Runner is pre-imported at top of file
             outlook_data = run_outlook_signup_with_identity(
                 page, device, identity.to_outlook_dict()
             )
+            logger.info("📧 Outlook signup runner returned.")
             
             if outlook_data == "RETRY":
                 logger.warning(f"🔄 Outlook signaled retry (Attempt {attempt + 1})")

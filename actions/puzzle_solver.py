@@ -7,15 +7,27 @@ Currently implements a manual intervention strategy.
 """
 
 import time
+import asyncio
 from loguru import logger
+from captcha_solver import solve_captcha
 
-def handle_puzzle_step(page) -> bool:
+def handle_puzzle_step(page, device=None):
     """
-    Handle the Amazon puzzle/challenge step.
+    Handles Amazon's 'Solve this puzzle' challenge.
+    First attempts automated solve, then falls back to manual.
+    """
+    logger.info("🧩 Puzzle Detected - Attempting Automated Solve...")
     
-    Prompts the user to solve the puzzle manually and waits for completion.
-    """
-    logger.warning("🧩 Amazon Puzzle Detected - MANUAL INTERVENTION REQUIRED 🧩")
+    # 1. Automated Solve Attempt
+    try:
+        if solve_captcha(page, device):
+            logger.success("✓ Puzzle solved via automated solver!")
+            return True
+    except Exception as e:
+        logger.error(f"Automated puzzle solve failed: {e}")
+
+    # 2. Manual Fallback
+    logger.warning("🧩 Automated solve failed or returned low confidence. MANUAL INTERVENTION REQUIRED 🧩")
     logger.warning("👉 Please switch to the browser and solve the puzzle manually.")
     
     try:
