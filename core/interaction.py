@@ -77,7 +77,13 @@ class InteractionEngine:
                     # Dynamically get the first property returned by the query, filtered to avoid methods
                     props = [p for p in dir(response) if not p.startswith('_') and not callable(getattr(response, p))]
                     if props:
-                        result = getattr(response, props[0])
+                        # Prioritize first non-empty property
+                        result = None
+                        for p in props:
+                            val = getattr(response, p)
+                            if val:
+                                result = val
+                                break
                         
                         # If query returns a list (e.g., ebook_items[]), pick a random item
                         if isinstance(result, list) and len(result) > 0:

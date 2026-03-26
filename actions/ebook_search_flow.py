@@ -174,32 +174,23 @@ def run_ebook_search_flow(playwright_page, device, session: SessionState) -> boo
             success = interaction.smart_click(
                 description="Buy now with 1-Click Button",
                 selectors=[
-                    # Standard Desktop IDs
+                    # Exact matches from DOM
+                    "input#one-click-button[type='submit']",
+                    "input.a-button-input[value*='1-Click']",
                     "#one-click-button",
-                    "#buy-now-button",
+                    "#buyNow-announce",
                     
-                    # Desktop Variants (Name based)
-                    "input[name='submit.one-click-checkout']",
-                    "input[name='submit.buy-now']",
-                    "input[name='submit.one-click-checkout-button']",
-                    
-                    # Data Actions (Modern Amazon)
-                    "[data-action='one-click-checkout']",
-                    "[data-action='one-click-checkout-button']",
-                    
-                    # CSS based (Text)
+                    # Backup patterns
+                    "input[name*='one-click-order']",
                     "span.a-button-inner:has-text('Buy now with 1-Click')",
-                    "span.a-button-inner:has-text('Buy now')",
-                    "button#one-click-button-announce",
-                    "button:has-text('Buy now with 1-Click')",
-                    
-                    # XPath positional (Last resort)
                     "xpath=//*[@id='one-click-button']",
-                    "xpath=//input[contains(@id, 'buy-now') or contains(@id, 'one-click')]"
+                    "xpath=//input[@type='submit' and contains(@value, '1-Click')]"
                 ],
-                agentql_query="{ buy_now_1_click_button }",
+                # Semantic context specifically for the 'Buy now with 1-Click' submit button
+                agentql_query="{ buy_now_1_click_button: button('Buy now with 1-Click submit button') }",
                 cache_key="buy_now_1_click",
-                biomechanical=True
+                biomechanical=True,
+                timeout=10000
             )
             
             # Efficient Transition Check
