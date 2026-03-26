@@ -16,59 +16,69 @@ from amazon.device_adapter import DeviceAdapter
 def handle_passkey_nudge(page, device: DeviceAdapter = None) -> bool:
     """
     Detect and skip the Amazon passkey setup nudge.
-    
-    Args:
-        page: Playwright page object
-        device: DeviceAdapter instance
-        
-    Returns:
-        True if skipped or not present
+    Uses a multi-priority approach: ESC key -> Cached selectors -> AgentQL -> JS fallback.
     """
     if device is None:
         device = DeviceAdapter(page)
         
     url = page.url.lower()
     
-    # Check if we're on the passkey nudge page
+    # 1. Broad detection (is_nudge_page)
     is_nudge_page = False
     if "/claim/webauthn/nudge" in url or "webauthn" in url:
         is_nudge_page = True
     
-    # Content indicators
     indicators = [
         "text='Use face ID, fingerprint, or PIN to sign in'",
-        "text='Use your face, fingerprint, or PIN'",
         "text='Set up a passkey'",
         "text='Create a passkey'",
-        "text='Skip the password next time'", # From two_step_verification
-        "#passkey-nudge-skip-button",
-        "text='Not now'",
-        "text='Skip'"
+        "text='Skip'",
+        "#passkey-nudge-skip-button"
     ]
     
     if not is_nudge_page:
-        for indicator in indicators[:2]:
+        for indicator in indicators:
             try:
-                if page.locator(indicator).first.is_visible(timeout=1000):
+                if page.locator(indicator).first.is_visible(timeout=500):
                     is_nudge_page = True
                     break
-            except:
-                continue
+            except: continue
                 
     if not is_nudge_page:
         return True # Not on nudge page, continue
         
-    logger.info("🛡️ Passkey nudge detected, skipping...")
+    logger.info("🛡️ Passkey nudge detected. Dismissing popups and skipping...")
     
-    # 1. Clear potential system popups (Touch ID / Fingerprint)
-    logger.info("⌨️ Pressing ESC x3 to dismiss dialogs...")
-    page.bring_to_front()
-    for _ in range(3):
-        page.keyboard.press("Escape")
-        time.sleep(0.5)
-    time.sleep(0.5)
+    # 2. Clear potential system popups (Touch ID / Fingerprint / WebAuthn)
+    # This is critical as these dialogs block traditional Playwright clicks
+    logger.info("⌨️ Dismissing browser/system passkey dialog (ESC x3)...")
+    try:
+        page.bring_to_front()
+        for _ in range(3):
+            page.keyboard.press("Escape")
+            time.sleep(0.3)
+    except Exception as e:
+        logger.debug(f"Escape key failed: {e}")
+
+    # 3. Priority 1: AgentQL / Cached selectors for pinpoint accuracy
+    try:
+        from amazon.agentql_helper import query_amazon
+        results = query_amazon(page, "passkey_nudge")
         
-    # 2. Click "Skip" button
+        # Prioritize Cancel as requested by user / Outlook inspiration
+        btn_data = results.get("cancel_link") or results.get("skip_button")
+        
+        if btn_data and btn_data.get('element'):
+            element = btn_data['element']
+            logger.info(f"Found {'Cancel' if results.get('cancel_link') else 'Skip'} button via AgentQL, clicking...")
+            # Use js_click for maximum reliability as it bypasses overlays
+            device.js_click(element, "passkey dismiss button (AgentQL)")
+            time.sleep(random.uniform(*DELAYS["page_load"]))
+            return True
+    except Exception as e:
+        logger.debug(f"AgentQL approach failed for passkey: {e}")
+
+    # 4. Priority 2: Standard Selectors
     skip_selectors = [
         "#passkey-nudge-skip-button",
         "button:has-text('Skip setup')",
@@ -80,51 +90,43 @@ def handle_passkey_nudge(page, device: DeviceAdapter = None) -> bool:
         "a:has-text('Not now')",
         "button:has-text('Not now')",
         "text='Not now'",
-        ".a-button-text:has-text('Not now')",
-        "#passkey-creation-skip-link",
-        "text='No, keep using password'" # From two_step_verification
+        "#passkey-creation-skip-link"
     ]
     
-    clicked = False
     for selector in skip_selectors:
         try:
             element = page.locator(selector).first
-            if element.is_visible(timeout=2000):
-                logger.info(f"Found Skip button with selector: {selector}")
-                device.tap(element, "Skip button")
-                clicked = True
-                break
-        except:
-            continue
+            if element.is_visible(timeout=1000):
+                logger.info(f"Found Skip button via selector: {selector}")
+                device.js_click(element, f"Skip button ({selector})")
+                time.sleep(random.uniform(*DELAYS["page_load"]))
+                return True
+        except: continue
             
-    if not clicked:
-        try:
-            result = page.evaluate("""
-                () => {
-                    const elements = Array.from(document.querySelectorAll('a, button, span, div'));
-                    const skipBtn = elements.find(el => {
-                        if (!el.textContent) return false;
-                        const t = el.textContent.toLowerCase().trim();
-                        return t === 'skip' || t === 'not now' || t.includes('no, keep using') || t === 'skip setup';
-                    });
-                    if (skipBtn) {
-                        skipBtn.click();
-                        ['mousedown', 'click', 'mouseup'].forEach(n => skipBtn.dispatchEvent(new MouseEvent(n, {bubbles:true})));
-                        if (skipBtn.href) { window.location.href = skipBtn.href; }
-                        return 'clicked_text';
-                    }
-                    return null;
+    # 5. Priority 3: Ultimate JS Fallback (Text-based search)
+    try:
+        result = page.evaluate("""
+            () => {
+                const elements = Array.from(document.querySelectorAll('a, button, span, div'));
+                const skipBtn = elements.find(el => {
+                    if (!el.textContent) return false;
+                    const t = el.textContent.toLowerCase().trim();
+                    const targets = ['skip', 'not now', 'no, keep using', 'skip setup', 'maybe later'];
+                    return targets.includes(t) || (t.includes('skip') && t.length < 15);
+                });
+                if (skipBtn) {
+                    skipBtn.click();
+                    ['mousedown', 'click', 'mouseup'].forEach(n => skipBtn.dispatchEvent(new MouseEvent(n, {bubbles:true})));
+                    return true;
                 }
-            """)
-            if result:
-                logger.success(f"✓ Skip button clicked via JS: {result}")
-                clicked = True
-        except:
-            pass
+                return false;
+            }
+        """)
+        if result:
+            logger.success("✓ Skip button clicked via ultimate JS fallback")
+            time.sleep(random.uniform(*DELAYS["page_load"]))
+            return True
+    except: pass
             
-    if clicked:
-        time.sleep(random.uniform(*DELAYS["page_load"]))
-        return True
-        
-    logger.warning("Could not click Skip button on passkey nudge")
+    logger.warning("Could not click Skip button on passkey nudge. Continuing anyway...")
     return False

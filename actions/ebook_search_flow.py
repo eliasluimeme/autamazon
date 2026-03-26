@@ -169,40 +169,48 @@ def run_ebook_search_flow(playwright_page, device, session: SessionState) -> boo
                     playwright_page.goto(KINDLE_STORE_URL)
                     
         elif state == "product_page":
-            # Execute Buy Now (Enhanced with Desktop Selectors)
+            # Execute Buy Now (Enhanced with Desktop and Mobile Selectors)
             initial_url = playwright_page.url
+            
+            # Proactive scroll to ensure the buy box is loaded and trigger lazy-load scripts
+            device.scroll("down", "small")
+            time.sleep(1.5)
+            
             success = interaction.smart_click(
                 description="Buy now with 1-Click Button",
                 selectors=[
-                    # Exact matches from DOM
-                    "input#one-click-button[type='submit']",
+                    # Exact matches for mobile/desktop Kindle store
+                    "input#one-click-button",
+                    "input[name='submit.one-click-checkout']",
+                    "input[name='submit.buy-now']",
                     "input.a-button-input[value*='1-Click']",
                     "#one-click-button",
                     "#buyNow-announce",
                     
                     # Backup patterns
                     "input[name*='one-click-order']",
+                    "input[id*='oneClick']",
                     "span.a-button-inner:has-text('Buy now with 1-Click')",
                     "xpath=//*[@id='one-click-button']",
                     "xpath=//input[@type='submit' and contains(@value, '1-Click')]"
                 ],
-                # Semantic context specifically for the 'Buy now with 1-Click' submit button
-                agentql_query="{ buy_now_1_click_button: button('Buy now with 1-Click submit button') }",
+                # Semantic query - Simplified for AgentQL to be more robust
+                agentql_query="{ buy_now_button }",
                 cache_key="buy_now_1_click",
                 biomechanical=True,
-                timeout=10000
+                timeout=12000 # Slightly longer timeout for mobile loads
             )
             
             # Efficient Transition Check
             logger.info("⏳ Monitoring for transition after Buy Now click...")
-            for _ in range(10):
+            for _ in range(12):
                 time.sleep(1)
                 current_state = detect_cart_state(playwright_page)
                 if current_state == "login_prompt":
                     logger.success("✅ Transitioned to Login Prompt - Buy Now Successful!")
                     return True
-                if playwright_page.url != initial_url and "/ap/" in playwright_page.url:
-                    logger.success("✅ URL changed to auth page - Buy Now Successful!")
+                if playwright_page.url != initial_url and any(x in playwright_page.url for x in ["/ap/", "signin", "register"]):
+                    logger.success("✅ URL changed to auth/login page - Buy Now Successful!")
                     return True
                     
             if not success:

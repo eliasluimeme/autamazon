@@ -10,6 +10,7 @@ class AdsPowerProfileManager:
     """
     def __init__(self, api_url=ADSPOWER_API_URL):
         self.api_url = api_url
+        self.last_error = None
 
     def _api_request(self, endpoint, payload=None):
         try:
@@ -23,7 +24,8 @@ class AdsPowerProfileManager:
             data = resp.json()
             
             if data["code"] != 0:
-                logger.error(f"⚠️ API Error ({endpoint}): {data.get('msg')}")
+                self.last_error = data.get("msg")
+                logger.error(f"⚠️ API Error ({endpoint}): {self.last_error}")
                 return None
             return data["data"]
         except Exception as e:

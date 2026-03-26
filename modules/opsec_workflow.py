@@ -13,6 +13,7 @@ from patchright.sync_api import sync_playwright
 from modules.config import ADSPOWER_API_URL
 from modules.persona_factory import PersonaFactory
 from modules.sanity_checks import run_all_checks
+from utils.popup_blocker import setup_robust_popup_blocker
 
 class SanityCheckException(Exception):
     """Local exception for sanity check failures."""
@@ -165,8 +166,8 @@ class OpSecBrowserManager:
             
             logger.success("✅ Connected to browser via patchright")
             
-            # Perform initial health check automatically
-            # self.check_fingerprint_health()
+            # Setup persistent blocker (safe for proxies, blocks WebAuthn/Popups across navigations)
+            setup_robust_popup_blocker(self.page)
             
             return self.page
             

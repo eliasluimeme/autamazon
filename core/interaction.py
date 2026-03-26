@@ -63,49 +63,67 @@ class InteractionEngine:
         # 3. AgentQL Defensive Fallback
         if agentql_query:
             logger.info(f"Falling back to AgentQL for '{description}'...")
-            try:
-                # Check if page is closed
-                if self.page.is_closed():
-                    logger.error("❌ Page is closed. Cannot execute AgentQL.")
-                    return False
+            for attempt in range(2):
+                try:
+                    # Check if page is closed
+                    if self.page.is_closed():
+                        logger.error("❌ AgentQL: Page is closed.")
+                        return False
+                    
+                    if attempt > 0:
+                        time.sleep(1.5)
+                        logger.info(f"Retrying AgentQL for '{description}' (Attempt {attempt + 1})...")
 
-                aql_page = agentql.wrap(self.page)
-                # Execute the semantic query
-                response = aql_page.query_elements(agentql_query)
-                
-                if response:
-                    # Dynamically get the first property returned by the query, filtered to avoid methods
-                    props = [p for p in dir(response) if not p.startswith('_') and not callable(getattr(response, p))]
-                    if props:
-                        # Prioritize first non-empty property
-                        result = None
-                        for p in props:
-                            val = getattr(response, p)
-                            if val:
-                                result = val
-                                break
-                        
-                        # If query returns a list (e.g., ebook_items[]), pick a random item
-                        if isinstance(result, list) and len(result) > 0:
-                            import random
-                            item = random.choice(result)
-                            # Get the first property of the item, usually the link or element itself
-                            sub_props = [p for p in dir(item) if not p.startswith('_') and not callable(getattr(item, p))]
-                            element = getattr(item, sub_props[0]) if sub_props else item
-                        else:
-                            element = result
+                    aql_page = agentql.wrap(self.page)
+                    # Execute the semantic query
+                    response = aql_page.query_elements(agentql_query)
+                    
+                    if response:
+                        # Dynamically get the first property returned by the query, filtered to avoid methods
+                        props = [p for p in dir(response) if not p.startswith('_') and not callable(getattr(response, p))]
+                        if props:
+                            # Prioritize first non-empty property
+                            result = None
+                            for p in props:
+                                val = getattr(response, p)
+                                if val:
+                                    result = val
+                                    break
                             
-                        if element and not callable(element):
-                            logger.info(f"✓ Found '{description}' via AgentQL")
-                            if cache_key:
-                                extract_and_cache_xpath(element, cache_key)
-                            return self._execute_click(element, description, biomechanical)
-            except Exception as e:
-                err_msg = str(e).lower()
-                if "target page, context or browser has been closed" in err_msg or "target closed" in err_msg:
-                    logger.error("❌ AgentQL: Browser closed during query.")
-                else:
+                            # If query returns a list (e.g., ebook_items[]), pick a random item
+                            if isinstance(result, list) and len(result) > 0:
+                                import random
+                                item = random.choice(result)
+                                # Get the first property of the item, usually the link or element itself
+                                sub_props = [p for p in dir(item) if not p.startswith('_') and not callable(getattr(item, p))]
+                                element = getattr(item, sub_props[0]) if sub_props else item
+                            else:
+                                element = result
+                                
+                            if element and not callable(element):
+                                logger.info(f"✓ Found '{description}' via AgentQL")
+                                if cache_key:
+                                    extract_and_cache_xpath(element, cache_key)
+                                return self._execute_click(element, description, biomechanical)
+                                
+                    # If we got here but didn't return, it means we didn't find the element
+                    if attempt == 0: continue # Try one more time
+                    
+                except Exception as e:
+                    err_msg = str(e).lower()
+                    if "target page, context or browser has been closed" in err_msg or "target closed" in err_msg:
+                        logger.error("❌ AgentQL: Browser closed during query.")
+                        return False
+                    
+                    # Specific handling for the MutationObserver error seen in logs
+                    if "mutationobserver" in err_msg or "unexpected character" in err_msg:
+                        logger.warning(f"AgentQL transient error (attempt {attempt+1}): {e}")
+                        if attempt == 0:
+                            time.sleep(1)
+                            continue # Try one more time
+                            
                     logger.error(f"AgentQL query failed for {description}: {e}")
+                    if attempt == 0: continue
                 
                 
         if not suppress_errors:

@@ -113,7 +113,8 @@ class PooledIdentity:
             city=self.city or fallback["city"],
             zip_code=self.zip_code or fallback["zip"],
             state=self.region_state or fallback["state"],
-            country=self.country or full_country,
+            country=full_country,
+
             phone=self.phone or fallback["phone"],
         )
 

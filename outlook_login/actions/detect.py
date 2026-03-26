@@ -25,23 +25,29 @@ def detect_current_step(page, agentql_page=None) -> str:
         logger.error("🛑 Browser network error detected.")
         return "ERROR"
         
-    # Priority 0.5: Try cached selectors
-    step = _detect_via_cache(page)
+    # Priority 0.5: Try EMAIL/PASSWORD via cache (Fast path)
+    step = _detect_via_cache(page, restrict_to=["EMAIL", "PASSWORD", "SUCCESS"])
     if step != "UNKNOWN":
-        logger.debug(f"Step detected via cache: {step}")
+        logger.debug(f"Critical step detected via cache: {step}")
         return step
     
-    # Priority 1: AgentQL
+    # Priority 1: AgentQL (Best at disambiguating ambiguous screens like Passkey vs Password skip)
     if agentql_page:
         step = _detect_via_agentql(page, agentql_page)
         if step != "UNKNOWN":
             logger.debug(f"Step detected via AgentQL: {step}")
             return step
     
-    # Priority 2: CSS Selectors fallback
+    # Priority 1.5: CSS Selectors fallback (Reliable but slower than cache)
     step = _detect_via_selectors(page)
     if step != "UNKNOWN":
         logger.debug(f"Step detected via selectors: {step}")
+        return step
+
+    # Priority 1.8: Try OTHER caches (less reliable, e.g. SKIP/PASSKEY)
+    step = _detect_via_cache(page)
+    if step != "UNKNOWN":
+        logger.debug(f"Other step detected via cache: {step}")
         return step
     
     return "UNKNOWN"
@@ -140,20 +146,25 @@ def _is_network_error(page) -> bool:
     return False
 
 
-def _detect_via_cache(page) -> str:
+def _detect_via_cache(page, restrict_to=None) -> str:
     # We use custom cache keys specific to login to avoid clash with signup
     indicator_keys = {
         "EMAIL": "login_email_input",
         "PASSWORD": "login_password_input",
         "SKIP": "login_skip_button",
         "PASSKEY": "login_passkey_skip_button",
+        "PASSKEY_CANCEL": "login_passkey_cancel_button",
         "PRIVACY": "login_privacy_ok_button",
         "STAY_SIGNED_IN": "login_stay_signed_in_yes",
     }
     
     for step, key in indicator_keys.items():
-        el = find_element(page, key, timeout=500)
+        if restrict_to and step not in restrict_to:
+            continue
+        el = find_element(page, key, timeout=300)
         if el:
+            if step == "PASSKEY_CANCEL":
+                return "PASSKEY"
             return step
                 
     return "UNKNOWN"
@@ -265,6 +276,15 @@ def _detect_via_agentql(page, agentql_page) -> str:
         if response.passkey_skip_button:
             if DOMPATH_AVAILABLE:
                 extract_and_cache_xpath(response.passkey_skip_button, "login_passkey_skip_button", {"step": "detect"})
+            return "PASSKEY"
+
+        if response.cancel_button:
+            if DOMPATH_AVAILABLE:
+                extract_and_cache_xpath(response.cancel_button, "login_passkey_cancel_button", {"step": "detect"})
+            return "PASSKEY"
+
+        if response.try_again_button:
+            # We don't cache TAY but we return PASSKEY to handle it (likely clicking Cancel)
             return "PASSKEY"
 
         if response.privacy_ok_button:

@@ -676,7 +676,7 @@ IMPORTANT:
                 # Fill and submit
                 inp = self.page.locator("#captchacharacters, #auth-captcha-guess, input[name='cvf_captcha_input']").first
                 inp.fill(text)
-                time.sleep(0.5)
+                time.sleep(random.uniform(1.2, 2.0))
                 for sel in ["button:has-text('Continue')", "button[type='submit']", "input[type='submit']"]:
                     btn = self.page.locator(sel).first
                     if btn.count() > 0:
@@ -719,7 +719,7 @@ IMPORTANT:
             return False
 
         # 2. Click Confirm
-        time.sleep(random.uniform(0.5, 1.0))
+        time.sleep(random.uniform(1.2, 2.2))
         self._click_confirm()
         return True
 
@@ -952,6 +952,7 @@ IMPORTANT:
             inp = self.page.locator("#captchacharacters, #auth-captcha-guess, input[name='cvf_captcha_input']").first
             inp.fill(text)
             # Submit
+            time.sleep(random.uniform(1.2, 2.0))
             for sel in ["button:has-text('Continue')", "button[type='submit']", "input[type='submit']"]:
                 try:
                     btn = self.page.locator(sel).first
@@ -1097,7 +1098,7 @@ IMPORTANT:
             time.sleep(random.uniform(0.25, 0.55))
 
         # After clicking all tiles, wait a bit for the UI to register them
-        time.sleep(random.uniform(0.5, 1.0))
+        time.sleep(random.uniform(1.2, 2.0))
         self._click_confirm()
 
     def _switch_to_audio(self) -> bool:
@@ -1156,7 +1157,7 @@ IMPORTANT:
                     # Wait for the button to be visible and enabled
                     btn = f.locator("button#recaptcha-verify-button, .rc-button-default, button:has-text('Verify'), button:has-text('Skip'), button:has-text('Next')").first
                     if btn.is_visible(timeout=1000):
-                        time.sleep(random.uniform(0.3, 0.7))
+                        time.sleep(random.uniform(1.2, 2.0))
                         btn.click()
                         logger.debug(f"Clicked confirm inside iframe: {url[:50]}")
                         return
@@ -1179,6 +1180,7 @@ IMPORTANT:
                     btn = frame.locator(sel).first
                     if btn.count() > 0:
                         # Try JS click first for speed/avoid interception
+                        time.sleep(random.uniform(1.0, 1.8))
                         btn.evaluate("el => el.click()")
                         logger.debug(f"Clicked confirm via JS: {sel} in {frame.url[:40]}")
                         return
@@ -1190,7 +1192,7 @@ IMPORTANT:
                 try:
                     btn = frame.locator(sel).first
                     if btn.is_visible(timeout=500):
-                        time.sleep(0.3)
+                        time.sleep(random.uniform(1.0, 1.8))
                         btn.click(force=True, timeout=1000)
                         logger.debug(f"Clicked confirm via Native: {sel} in {frame.url[:40]}")
                         return
@@ -1204,6 +1206,10 @@ IMPORTANT:
     def solve(self) -> bool:
         """Run the full tiered solve with retry."""
         for attempt in range(1, self.MAX_ATTEMPTS + 1):
+            # Optional: delay before starting a new major attempt (if it's a retry)
+            if attempt > 1:
+                time.sleep(random.uniform(2.5, 4.0))
+                
             info = self.detect()
             if not info["type"]:
                 logger.success("No CAPTCHA present — proceeding")
@@ -1225,14 +1231,16 @@ IMPORTANT:
                         if self._switch_to_audio():
                             # Wait for transition and re-detect
                             for _ in range(3):
-                                time.sleep(1.5)
+                                # Delay between detection checks after switch
+                                time.sleep(random.uniform(1.8, 2.8))
                                 info = self.detect()
                                 if info["type"] == "amazon_audio":
                                     logger.info("✅ Successfully switched to Audio mode")
                                     break
                             if info["type"] == "amazon_audio":
                                 break
-                        time.sleep(1)
+                        # Delay when failing to switch to audio
+                        time.sleep(random.uniform(1.5, 2.5))
 
                 # 2. Iterative Nopecha Solve (Up to 5 tries within this tier)
                 for nope_try in range(5):
@@ -1246,7 +1254,8 @@ IMPORTANT:
                     
                     logger.info(f"Nopecha Solve Tier (Attempt {attempt}, Try {nope_try + 1}): {info['type']}")
                     if self._solve_nopecha(element, info):
-                        time.sleep(2) # Wait for processing
+                        # Wait for processing/transition
+                        time.sleep(random.uniform(2.5, 3.5)) 
                         post = self.detect()
                         if not post["type"]:
                             logger.success(f"✅ Resolved via Nopecha Priority Tier")
@@ -1254,13 +1263,18 @@ IMPORTANT:
                         else:
                             logger.warning(f"Nopecha reported success but CAPTCHA still present (Type: {post['type']})")
                             info = post # Update for next try
+                            # Delay when retrying within loop
+                            time.sleep(random.uniform(2.0, 3.5))
                     else:
                         logger.warning(f"Nopecha solve failed for {info['type']}")
                         # If grid failed, try one last time to switch to audio if not already
                         if info["type"] == "amazon_cvf" and nope_try == 0:
                             self._switch_to_audio()
-                            time.sleep(2)
+                            time.sleep(random.uniform(2.0, 3.0))
                             info = self.detect()
+                        else:
+                            # Delay when retrying after solve failure
+                            time.sleep(random.uniform(2.0, 3.5))
                 
                 if not self.detect()["type"]: return True
                 logger.info("Nopecha Tier exhausted, falling back to other solvers...")
@@ -1282,7 +1296,7 @@ IMPORTANT:
                         self._click_coordinates(ai_result["clicks"], element)
 
                     self._click_confirm()
-                    time.sleep(3)
+                    time.sleep(random.uniform(2.5, 4.0))
 
                     # Check if solved
                     post = self.detect()
@@ -1293,6 +1307,8 @@ IMPORTANT:
                     # Re-detect since grid changed after wrong answer
                     info = self.detect()
                     element = info.get("element", element)
+                    # Retry delay after wrong answer
+                    time.sleep(random.uniform(2.0, 3.5))
                 else:
                     logger.warning(f"AI confidence {conf} < {self.min_confidence} — skipping AI")
 
@@ -1311,17 +1327,18 @@ IMPORTANT:
                 logger.info(f"Capsolver try {capsolver_tries}/{max_capsolver_tries} for {info['type']} (target: {info.get('target', '?')})")
                 if self._solve_capsolver(element, info):
                     # Check if solved
-                    time.sleep(1)
+                    time.sleep(random.uniform(2.0, 3.5))
                     if not self.detect()["type"]:
                         return True
                 
-                # If Capsolver failed and it hasn't been solved, try remaining attempts in Tier 0
+                # Delay between Capsolver retries
+                time.sleep(random.uniform(2.0, 3.5))
                 break
                 
                 # If still on grid, try switching to audio in the next loop or here
                 if info["type"] == "amazon_cvf":
                     if self._switch_to_audio():
-                        time.sleep(1)
+                        time.sleep(random.uniform(2.0, 3.0))
                         continue # Re-run from detection as audio
                     break
                 else: 
@@ -1334,7 +1351,7 @@ IMPORTANT:
             # If we reach here, none of the tiers worked this attempt
             logger.warning(f"Attempt {attempt} failed — refreshing puzzle")
             self._try_refresh_puzzle()
-            time.sleep(2)
+            time.sleep(random.uniform(3.0, 5.0)) # Delay after puzzle refresh
 
         logger.error(f"❌ CAPTCHA not solved after {self.MAX_ATTEMPTS} attempts")
         return False

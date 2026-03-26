@@ -124,6 +124,13 @@ from modules.proxy import get_proxy_config
 # Track per-profile log handler IDs for cleanup
 _profile_log_handlers = {}
 
+# Shared state for thread-safe pacing
+_creation_lock = threading.Lock()
+_last_creation_time = [0.0]
+_stagger_lock = threading.Lock()
+_last_launch_time = [0.0]
+_first_launch = [True]
+
 
 class EmailPool:
     """
@@ -674,12 +681,11 @@ def _run_outlook_with_preloaded_identity(manager, page, device, identity: Pooled
             if outlook_data and isinstance(outlook_data, dict):
                 logger.success(f"✓ Outlook signup successful: {outlook_data.get('email_handle')}@outlook.com")
                 
-                generated_identity = Identity(
-                    firstname=outlook_data['firstname'],
-                    lastname=outlook_data['lastname'],
-                    email=f"{outlook_data['email_handle']}@outlook.com",
-                    password=outlook_data['password']
-                )
+                # Use the complete identity conversion from PooledIdentity
+                generated_identity = identity.to_amazon_identity()
+                # Ensure the email handle reflects any changes during execution (though unlikely)
+                generated_identity.email = f"{outlook_data['email_handle']}@outlook.com"
+
                 
                 final_page = manager.context.new_page()
                 page.close()
@@ -729,7 +735,7 @@ def _cleanup_profile(profile: ManagedProfile, manager, identity_pool: IdentityPo
 
 
 def run_profile_with_retry(
-    profile_id: str,
+    task_input: str | int,
     lifecycle: ProfileLifecycleManager,
     identity_pool: IdentityPool,
     max_retries: int = 3,
@@ -737,27 +743,104 @@ def run_profile_with_retry(
     email_pool: "EmailPool | None" = None,
     drop_on_phone: bool = False,
     skip_delete: bool = False,
+    # New arguments for automatic creation
+    os_type: str = "windows",
+    country: str = "AU",
 ) -> bool:
     """
-    Wrapper for run_profile_pipeline that handles retries.
+    Wrapper for run_profile_pipeline that handles retries and on-demand creation.
     """
+    is_automatic = isinstance(task_input, int)
+    task_idx = task_input if is_automatic else 0
+    last_known_profile_id = None if is_automatic else str(task_input)
+
     try:
         for attempt_idx in range(max_retries):
             attempt = attempt_idx + 1
+            
+            # --- 1. Resolve/Create Profile ---
+            current_profile_id: str | None = last_known_profile_id
+            
+            if is_automatic:
+                # If we're retrying, cleanup the failed profile from previous attempt
+                if last_known_profile_id:
+                    logger.info(f"🔄 Cleaning up failed profile {last_known_profile_id} before retry...")
+                    try:
+                        AdsPowerProfileManager().stop_profile(last_known_profile_id)
+                        if not skip_delete:
+                            AdsPowerProfileManager().delete_profile(last_known_profile_id)
+                    except: pass
+                    last_known_profile_id = None
 
-            # Stagger retries to avoid hammering services
-            if attempt > 1:
-                wait_time = random.uniform(5, 10)
-                logger.info(f"⏳ Waiting {wait_time:.1f}s before retry {attempt}/{max_retries} for {profile_id}...")
-                time.sleep(wait_time)
+                # Create profile with pacing to avoid AdsPower API rate limits
+                while True:
+                    if shutdown_event.is_set(): return False
+                    
+                    with _creation_lock:
+                        elapsed = time.time() - _last_creation_time[0]
+                        # Respect a 3.5s gap between creation API calls (AdsPower is sensitive)
+                        wait = max(0.0, 3.5 - elapsed)
+                        if wait > 0:
+                            time.sleep(wait)
+                        
+                        manager = AdsPowerProfileManager()
+                        # Name includes task index and timestamp for uniqueness
+                        name = f"Auto_{os_type.capitalize()}_{int(time.time())}_{task_idx + 1}"
+                        proxy_config = get_proxy_config(country=country.lower())
+                        
+                        logger.info(f"🆕 [Task {task_idx+1}] Creating automatic profile: {name} (Attempt {attempt})")
+                        created_pid = manager.create_profile_v2(
+                            name=name,
+                            os_type=os_type,
+                            proxy_config=proxy_config
+                        )
+                        _last_creation_time[0] = time.time()
+                    
+                    if not created_pid:
+                        err = getattr(manager, 'last_error', "") or ""
+                        if "limit" in err.lower() and ("exceed" in err.lower() or "delete" in err.lower()):
+                            logger.warning(f"⚠️ [Task {task_idx+1}] AdsPower account full (limit reached). Waiting 30s for a slot...")
+                            time.sleep(30)
+                            continue # Retry creation until slot is available
+                        else:
+                            # Standard error (rate limit, connection, etc.)
+                            logger.error(f"❌ [Task {task_idx+1}] Failed to create profile on attempt {attempt}")
+                            break # Fall back to outer retry loop
+                    else:
+                        break # Success!
+                
+                if not created_pid:
+                    if attempt < max_retries:
+                        time.sleep(random.uniform(5, 10))
+                        continue
+                    return False
+                
+                current_profile_id = created_pid
+                last_known_profile_id = current_profile_id
+                logger.info(f"✅ [Task {task_idx+1}] Created profile: {current_profile_id}")
 
-                # Increment retry count in metrics if already registered
-                profile = lifecycle.get_profile(profile_id)
-                if profile:
-                    profile.metrics.retry_count += 1
+            if current_profile_id is None:
+                continue
 
+            # --- 2. Stagger Browser Launch ---
+            # Even if created, we stagger the actual launch to avoid high CPU spikes 
+            # and AdsPower/CDP websocket conflicts.
+            with _stagger_lock:
+                if _first_launch[0]:
+                    _first_launch[0] = False
+                else:
+                    # 5-10s gap between browser starts
+                    gap = random.uniform(5, 10)
+                    elapsed = time.time() - _last_launch_time[0]
+                    wait = max(0.0, gap - elapsed)
+                    if wait > 0:
+                        logger.info(f"⏳ Staggering: waiting {wait:.1f}s before launching {current_profile_id}...")
+                        time.sleep(wait)
+                _last_launch_time[0] = time.time()
+
+            # --- 3. Execute Pipeline ---
             result = run_profile_pipeline(
-                profile_id, lifecycle, identity_pool,
+                current_profile_id, lifecycle, identity_pool,
                 attempt=attempt,
                 skip_outlook_signup=skip_outlook_signup,
                 email_pool=email_pool,
@@ -768,33 +851,32 @@ def run_profile_with_retry(
                 return True
             
             if result == "DROPPED_PHONE":
-                logger.warning(f"⚠️ Profile {profile_id} was DROPPED terminaly. Skipping retries.")
+                logger.warning(f"⚠️ Profile {current_profile_id} was DROPPED terminaly. Skipping retries.")
                 return False
 
             if shutdown_event.is_set():
-                logger.warning(f"Aborting retries for {profile_id} due to shutdown")
+                logger.warning(f"Aborting retries for {current_profile_id} due to shutdown")
                 break
 
             if attempt < max_retries:
-                logger.warning(f"❌ Attempt {attempt} failed for {profile_id}. Queueing retry...")
+                logger.warning(f"❌ Attempt {attempt} failed for {current_profile_id}. Queueing retry...")
             else:
-                logger.error(f"❌ All {max_retries} attempts failed for {profile_id}")
+                logger.error(f"❌ All {max_retries} attempts failed for {current_profile_id}")
 
         return False
     finally:
         # Pre-emptive stop just in case pipeline crashed or finished without stopping
-        try:
-            manager = AdsPowerProfileManager()
-            manager.stop_profile(profile_id)
-        except:
-            pass
-            
-        if not skip_delete:
-            logger.info(f"🗑️ Final cleanup: Deleting profile {profile_id} from AdsPower...")
+        if last_known_profile_id:
             try:
-                manager.delete_profile(profile_id)
-            except Exception as e:
-                logger.error(f"Failed to delete profile {profile_id}: {e}")
+                AdsPowerProfileManager().stop_profile(last_known_profile_id)
+            except: pass
+            
+            if not skip_delete and is_automatic:
+                logger.info(f"🗑️ Final cleanup: Deleting automatic profile {last_known_profile_id}...")
+                try:
+                    AdsPowerProfileManager().delete_profile(last_known_profile_id)
+                except Exception as e:
+                    logger.error(f"Failed to delete profile {last_known_profile_id}: {e}")
 
 
 def main():
@@ -848,43 +930,23 @@ def main():
         config.ONLINESIM_DEFAULT_COUNTRY = country_id_map.get(args.country.upper(), 1)
 
     # ──────────────────────────────────────────────────
-    # STEP 0: Resolve Profiles (Create if needed)
+    # STEP 0: Resolve Work Items
     # ──────────────────────────────────────────────────
-    profile_ids = args.profiles or []
+    # If --profiles is provided, we use those specific profiles.
+    # If only --accounts is provided, we will create profiles one-by-one 
+    # inside the worker threads based on concurrency.
+    initial_profiles = args.profiles or []
     
-    if not profile_ids:
-        if not args.accounts:
-            logger.error("❌ Either --profiles or --accounts must be specified.")
-            sys.exit(1)
-        
-        logger.info(f"🆕 No profiles specified. Creating {args.accounts} new profiles...")
-        manager = AdsPowerProfileManager()
-        
-        os_type = args.os
-        
-        for i in range(args.accounts):
-            name = f"Auto_{os_type.capitalize()}_{int(time.time())}_{i+1}"
-            proxy_config = get_proxy_config(country=args.country.lower())
-            
-            pid = manager.create_profile_v2(
-                name=name,
-                os_type=os_type,
-                proxy_config=proxy_config
-            )
-            
-            if pid:
-                profile_ids.append(pid)
-                # Small delay to avoid API rate limits
-                if i < args.accounts - 1:
-                    time.sleep(1)
-            else:
-                logger.error(f"Failed to create profile {i+1}")
-        
-        if not profile_ids:
-            logger.error("❌ Failed to create any profiles. Exiting.")
-            sys.exit(1)
-        
-        logger.success(f"✅ Created {len(profile_ids)} profiles: {', '.join(profile_ids)}")
+    # tasks will be a list of either Profile IDs (strings) or placeholder indices (integers)
+    tasks = []
+    if initial_profiles:
+        tasks = initial_profiles
+    elif args.accounts:
+        tasks = list(range(args.accounts))
+        logger.info(f"🆕 No profiles specified. Will create {args.accounts} new profiles on-demand (max {args.concurrency} concurrent).")
+    else:
+        logger.error("❌ Either --profiles or --accounts must be specified.")
+        sys.exit(1)
     
     # ──────────────────────────────────────────────────
     # STEP 0b: Initialise email pool (if signin mode)
@@ -911,16 +973,16 @@ def main():
     # ──────────────────────────────────────────────────
     # STEP 2: Pre-warm identity pool
     # --------------------------------------------------
-    # Optimization: Don't over-generate identities if we only have a few profiles.
+    # Optimization: Don't over-generate identities if we only have a few tasks.
     # We want enough to cover concurrency plus a small buffer for instantaneous retries.
-    calculated_pool_size = min(args.pool_size, len(profile_ids) + 1)
+    calculated_pool_size = min(args.pool_size, len(tasks) + 1)
     
     identity_pool = IdentityPool(
         pool_size=calculated_pool_size, 
         country_code=args.country
     )
-    # Generate enough identities for all profiles BEFORE any browser starts
-    identity_pool.warm_up(count=len(profile_ids))
+    # Generate enough identities for all tasks BEFORE any browser starts
+    identity_pool.warm_up(count=len(tasks))
     identity_pool.start_background_generation()
     
     # ──────────────────────────────────────────────────
@@ -928,8 +990,8 @@ def main():
     # ──────────────────────────────────────────────────
     lifecycle = ProfileLifecycleManager(max_concurrent=args.concurrency)
     
-    # Register all profiles
-    for pid in profile_ids:
+    # Register any pre-existing profiles
+    for pid in initial_profiles:
         lifecycle.register_profile(pid)
     
     # ──────────────────────────────────────────────────
@@ -982,35 +1044,17 @@ def main():
     # queued profile starts without any delay introduced by the main thread.
     # ──────────────────────────────────────────────────
     logger.info(
-        f"🌟 Starting V3 Orchestrator: {len(profile_ids)} profiles, "
+        f"🌟 Starting V3 Orchestrator: {len(tasks)} tasks, "
         f"concurrency={args.concurrency}, pool_size={args.pool_size}"
     )
     
     results = {}
     start_time = time.time()
 
-    # Shared stagger state: workers serialize through this lock to ensure
-    # a minimum gap between actual browser launches.
-    _stagger_lock = threading.Lock()
-    _last_launch_time: list[float] = [0.0]
-    _first_launch: list[bool] = [True]
-
-    def _run_staggered(pid: str) -> bool:
-        """Worker wrapper: apply per-launch stagger then run pipeline with retry."""
-        with _stagger_lock:
-            if _first_launch[0]:
-                _first_launch[0] = False
-            else:
-                gap = random.uniform(2, 5)
-                elapsed = time.time() - _last_launch_time[0]
-                wait = max(0.0, gap - elapsed)
-                if wait > 0:
-                    logger.info(f"⏳ Staggering: waiting {wait:.1f}s before starting {pid}...")
-                    time.sleep(wait)
-            _last_launch_time[0] = time.time()
-
+    def _run_worker(task_input) -> bool:
+        """Worker wrapper: run pipeline with retry and on-demand creation."""
         return run_profile_with_retry(
-            pid,
+            task_input,
             lifecycle,
             identity_pool,
             max_retries=args.max_retries,
@@ -1018,26 +1062,29 @@ def main():
             email_pool=email_pool,
             drop_on_phone=args.drop_on_phone,
             skip_delete=args.skip_delete,
+            os_type=args.os,
+            country=args.country,
         )
 
     with ThreadPoolExecutor(
         max_workers=args.concurrency,
         thread_name_prefix="worker"
     ) as executor:
-        # Submit ALL profiles upfront — the executor automatically queues
+        # Submit ALL tasks upfront — the executor automatically queues
         # any beyond max_workers and starts them as slots free up.
-        futures_map = {executor.submit(_run_staggered, pid): pid for pid in profile_ids}
+        # If --accounts was used, only 'concurrency' profiles will be created at any one time.
+        futures_map = {executor.submit(_run_worker, task): task for task in tasks}
         
         for future in as_completed(futures_map):
-            pid = futures_map[future]
+            task_info = futures_map[future]
             try:
                 success = future.result()
-                results[pid] = success
+                results[str(task_info)] = success
                 status = "✅ SUCCESS" if success else "❌ FAILED"
-                logger.info(f"{status}: Profile {pid}")
+                logger.info(f"{status}: Task {task_info}")
             except Exception as e:
-                results[pid] = False
-                logger.error(f"💥 Profile {pid} crashed: {e}")
+                results[str(task_info)] = False
+                logger.error(f"💥 Task {task_info} crashed: {e}")
     
     # ──────────────────────────────────────────────────
     # STEP 6: Summary

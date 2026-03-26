@@ -282,6 +282,13 @@ AMAZON_QUERIES = {
         agree_and_continue_button
     }
     """,
+    "passkey_nudge": """
+    {
+        skip_button(a button or link that says 'Skip' or 'Not now' to proceed without setting up a passkey)
+        create_passkey_button(the primary yellow button to create a passkey)
+        cancel_link(any link or button that says 'Cancel' or 'Dismiss')
+    }
+    """,
 }
 
 

@@ -29,8 +29,8 @@ SELECTORS = {
     },
 
     "passkey": {
-        "skip_button": "button:has-text('Skip for now'), a:has-text('Skip for now'), button:has-text('Skip')",
-        "cancel_button": "button:has-text('Cancel'), a:has-text('Cancel'), #idBtn_Back:has-text('Cancel')",
+        "skip_button": "button:has-text('Skip for now'), a:has-text('Skip for now')",
+        "cancel_button": "button:has-text('Cancel'), a:has-text('Cancel')",
         "header": "h1:has-text('passkey'), h2:has-text('passkey'), h1:has-text('Passkey'), h2:has-text('Passkey')",
     },
 

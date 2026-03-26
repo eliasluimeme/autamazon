@@ -309,7 +309,7 @@ def solve_microsoft_press_and_hold_sync(page, max_retries=3):
 
 def run_test():
     # --- CONFIG ---
-    PROFILE_ID = "k1atak7y" # Re-using the profile as requested
+    PROFILE_ID = "k195awxh" # Re-using the profile as requested
     COUNTRY = "us"
     
     print(f"🚀 Starting Test Workflow using Profile: {PROFILE_ID}")

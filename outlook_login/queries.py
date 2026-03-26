@@ -10,6 +10,8 @@ DETECT_STEP_QUERY = """
     stay_signed_in_yes_button
     stay_signed_in_checkbox
     passkey_skip_button
+    cancel_button
+    try_again_button
     privacy_ok_button
     error_message
 }
