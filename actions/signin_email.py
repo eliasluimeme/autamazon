@@ -205,8 +205,9 @@ def handle_email_signin_step(page, identity, device: DeviceAdapter = None) -> bo
         
         # Step 2a: Press Enter inside the input field (Fastest, organic)
         try:
-            email_input.press("Enter", timeout=800)
-            time.sleep(1)
+            # Increased timeout to 2000ms as Amazon pages can be slow to respond to Enter 
+            email_input.press("Enter", timeout=2000)
+            time.sleep(1.5)
         except Exception as e:
             logger.debug(f"Pressing Enter failed: {e}")
             

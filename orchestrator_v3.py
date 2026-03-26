@@ -231,7 +231,8 @@ def run_profile_pipeline(
     attempt: int = 1,
     skip_outlook_signup: bool = False,
     email_pool: "EmailPool | None" = None,
-) -> bool:
+    drop_on_phone: bool = False,
+) -> bool | str:
     """
     Execute the full automation pipeline for a single profile.
 
@@ -396,8 +397,15 @@ def run_profile_pipeline(
             if not session.completion_flags.get("amazon_signup", False):
                 logger.info("👤 Phase: Signup")
                 from amazon.actions.signup_flow import run_signup_flow
-                if run_signup_flow(playwright_page, session, device):
+                signup_res = run_signup_flow(playwright_page, session, device, drop_on_phone=drop_on_phone)
+                
+                if signup_res is True:
                     logger.success("Signup complete")
+                elif signup_res == "DROPPED_PHONE":
+                    logger.warning("📱 Profile DROPPED: Encountered Amazon phone number verification.")
+                    session.update_flag("dropped_on_phone", True)
+                    _cleanup_profile(profile, manager, identity_pool, success=False)
+                    return "DROPPED_PHONE"
                 else:
                     logger.error("Signup failed")
                     _cleanup_profile(profile, manager, identity_pool, success=False)
@@ -475,7 +483,7 @@ def run_profile_pipeline(
             _teardown_profile_logging(profile_id)
 
 
-def _run_outlook_login_with_email(manager, page, device, email_data: dict, country_code: str = "AU"):
+def _run_outlook_login_with_email(manager, page, device, email_data: dict, country_code: str = "US"):
     """
     Run Outlook *sign-in* with an existing ``email:password`` credential.
 
@@ -490,7 +498,7 @@ def _run_outlook_login_with_email(manager, page, device, email_data: dict, count
         page:         Current Playwright page
         device:       DeviceAdapter
         email_data:   Dict with keys ``email`` and ``password``
-        country_code: Country for identity generation (default ``"AU"``).
+        country_code: Country for identity generation (default ``"US"``).
 
     Returns:
         Tuple of ``(Identity, page)`` on success, or ``(None, None)``.
@@ -552,6 +560,7 @@ def _run_outlook_login_with_email(manager, page, device, email_data: dict, count
                     city = base.get("city", "")
                     zip_code = base.get("zip", "")
                     state = base.get("state", "")
+                    phone = base.get("phone", "")
                     country_name_map = {
                         "US": "United States", "AU": "Australia", "GB": "United Kingdom",
                         "CA": "Canada", "DE": "Germany", "FR": "France", "IT": "Italy",
@@ -565,7 +574,7 @@ def _run_outlook_login_with_email(manager, page, device, email_data: dict, count
                     logger.warning(f"Identity generation failed, falling back to email handle: {gen_err}")
                     email_handle = email.split("@")[0]
                     firstname, lastname = email_handle, ""
-                    address, city, zip_code, state, country_full = "", "", "", "", country_code
+                    address, city, zip_code, state, country_full, phone = "", "", "", "", country_code, ""
 
                 generated_identity = Identity(
                     firstname=firstname,
@@ -577,6 +586,7 @@ def _run_outlook_login_with_email(manager, page, device, email_data: dict, count
                     zip_code=zip_code,
                     state=state,
                     country=country_full,
+                    phone=phone,
                 )
                 final_page = manager.context.new_page()
                 page.close()
@@ -725,44 +735,66 @@ def run_profile_with_retry(
     max_retries: int = 3,
     skip_outlook_signup: bool = False,
     email_pool: "EmailPool | None" = None,
+    drop_on_phone: bool = False,
+    skip_delete: bool = False,
 ) -> bool:
     """
     Wrapper for run_profile_pipeline that handles retries.
     """
-    for attempt_idx in range(max_retries):
-        attempt = attempt_idx + 1
+    try:
+        for attempt_idx in range(max_retries):
+            attempt = attempt_idx + 1
 
-        # Stagger retries to avoid hammering services
-        if attempt > 1:
-            wait_time = random.uniform(5, 10)
-            logger.info(f"⏳ Waiting {wait_time:.1f}s before retry {attempt}/{max_retries} for {profile_id}...")
-            time.sleep(wait_time)
+            # Stagger retries to avoid hammering services
+            if attempt > 1:
+                wait_time = random.uniform(5, 10)
+                logger.info(f"⏳ Waiting {wait_time:.1f}s before retry {attempt}/{max_retries} for {profile_id}...")
+                time.sleep(wait_time)
 
-            # Increment retry count in metrics if already registered
-            profile = lifecycle.get_profile(profile_id)
-            if profile:
-                profile.metrics.retry_count += 1
+                # Increment retry count in metrics if already registered
+                profile = lifecycle.get_profile(profile_id)
+                if profile:
+                    profile.metrics.retry_count += 1
 
-        success = run_profile_pipeline(
-            profile_id, lifecycle, identity_pool,
-            attempt=attempt,
-            skip_outlook_signup=skip_outlook_signup,
-            email_pool=email_pool,
-        )
+            result = run_profile_pipeline(
+                profile_id, lifecycle, identity_pool,
+                attempt=attempt,
+                skip_outlook_signup=skip_outlook_signup,
+                email_pool=email_pool,
+                drop_on_phone=drop_on_phone,
+            )
 
-        if success:
-            return True
+            if result is True:
+                return True
+            
+            if result == "DROPPED_PHONE":
+                logger.warning(f"⚠️ Profile {profile_id} was DROPPED terminaly. Skipping retries.")
+                return False
 
-        if shutdown_event.is_set():
-            logger.warning(f"Aborting retries for {profile_id} due to shutdown")
-            break
+            if shutdown_event.is_set():
+                logger.warning(f"Aborting retries for {profile_id} due to shutdown")
+                break
 
-        if attempt < max_retries:
-            logger.warning(f"❌ Attempt {attempt} failed for {profile_id}. Queueing retry...")
-        else:
-            logger.error(f"❌ All {max_retries} attempts failed for {profile_id}")
+            if attempt < max_retries:
+                logger.warning(f"❌ Attempt {attempt} failed for {profile_id}. Queueing retry...")
+            else:
+                logger.error(f"❌ All {max_retries} attempts failed for {profile_id}")
 
-    return False
+        return False
+    finally:
+        # Pre-emptive stop just in case pipeline crashed or finished without stopping
+        try:
+            manager = AdsPowerProfileManager()
+            manager.stop_profile(profile_id)
+        except:
+            pass
+            
+        if not skip_delete:
+            logger.info(f"🗑️ Final cleanup: Deleting profile {profile_id} from AdsPower...")
+            try:
+                manager.delete_profile(profile_id)
+            except Exception as e:
+                logger.error(f"Failed to delete profile {profile_id}: {e}")
 
 
 def main():
@@ -790,8 +822,30 @@ def main():
         default="emails/emails.txt",
         help="Path to the email credentials file used when --skip-outlook-signup is set (default: emails/emails.txt)",
     )
+    parser.add_argument(
+        "--drop-on-phone",
+        action="store_true",
+        help="Stop and drop the current profile if the phone number prompt appears in Amazon.",
+    )
+    parser.add_argument(
+        "--skip-delete",
+        action="store_true",
+        help="Skip automatic deletion of the AdsPower profile after the automation finishes or is dropped.",
+    )
 
     args = parser.parse_args()
+
+    # ──────────────────────────────────────────────────
+    # STEP -1: Override country-specific configs
+    # ──────────────────────────────────────────────────
+    import config
+    # Map country code to OnlineSim numeric country ID if possible
+    # (Simplified: just use the code as string first, mobile_verification handles it)
+    if args.country:
+        logger.info(f"🌍 Setting global country context to: {args.country}")
+        # OnlineSim country IDs: AU=61, US=1, GB=44, etc.
+        country_id_map = {"AU": 61, "US": 1, "GB": 44, "CA": 1, "DE": 49, "FR": 33}
+        config.ONLINESIM_DEFAULT_COUNTRY = country_id_map.get(args.country.upper(), 1)
 
     # ──────────────────────────────────────────────────
     # STEP 0: Resolve Profiles (Create if needed)
@@ -962,6 +1016,8 @@ def main():
             max_retries=args.max_retries,
             skip_outlook_signup=args.skip_outlook_signup,
             email_pool=email_pool,
+            drop_on_phone=args.drop_on_phone,
+            skip_delete=args.skip_delete,
         )
 
     with ThreadPoolExecutor(

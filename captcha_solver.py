@@ -544,7 +544,7 @@ IMPORTANT:
 
         try:
             if ctype == "amazon_cvf":
-                return self._capsolver_aws_waf(img_b64, target or "", images)
+                return self._capsolver_aws_waf(img_b64, target or "", element, images)
             elif ctype == "recaptcha":
                 if capsolver:
                     capsolver.api_key = self.capsolver_key
@@ -555,7 +555,7 @@ IMPORTANT:
             logger.error(f"Capsolver API failed: {e}")
         return False
 
-    def _capsolver_aws_waf(self, img_b64: str, target: str, tile_locators: Optional[List[Any]] = None) -> bool:
+    def _capsolver_aws_waf(self, img_b64: str, target: str, element, tile_locators: Optional[List[Any]] = None) -> bool:
         """AwsWafClassification — split grid into tiles and classify."""
         # Clean target
         clean_target = (target or "").replace("\n", " ").strip().lower()
@@ -648,9 +648,43 @@ IMPORTANT:
 
         ctype = info.get("type")
         if ctype == "amazon_cvf":
-            return self._nopecha_awscaptcha(element, info)
+            # Grid solve via API is unreliable for AWS WAF on Nopecha; return False to trigger audio switch fallback
+            logger.warning("Nopecha: Grid solve via API often fails for AWS WAF; favoring audio switch.")
+            return False
         elif ctype == "amazon_audio":
             return self._nopecha_awscaptcha_audio(element, info)
+        elif ctype == "amazon_text":
+            return self._nopecha_text(element, info)
+        return False
+
+    def _nopecha_text(self, element, info: Dict) -> bool:
+        """Solve Amazon text CAPTCHA using Nopecha OCR."""
+        try:
+            img_b64 = self._screenshot_b64(element)
+            url = "https://api.nopecha.com/v1/recognition"
+            headers = {"Authorization": f"Basic {self.nopecha_key}"}
+            payload = {
+                "type": "text",
+                "image_data": [img_b64]
+            }
+            resp = requests.post(url, headers=headers, json=payload, timeout=20)
+            data = resp.json()
+            if "data" in data and data["data"]:
+                text = data["data"][0]
+                logger.success(f"Nopecha text CAPTCHA: '{text}'")
+                
+                # Fill and submit
+                inp = self.page.locator("#captchacharacters, #auth-captcha-guess, input[name='cvf_captcha_input']").first
+                inp.fill(text)
+                time.sleep(0.5)
+                for sel in ["button:has-text('Continue')", "button[type='submit']", "input[type='submit']"]:
+                    btn = self.page.locator(sel).first
+                    if btn.count() > 0:
+                        btn.click()
+                        return True
+                return True
+        except Exception as e:
+            logger.error(f"Nopecha text OCR failed: {e}")
         return False
 
     def _interact_with_captcha_input(self, text: str) -> bool:
@@ -1179,24 +1213,57 @@ IMPORTANT:
             element = info["element"]
             
             # ────────────────────────────────────────────────────────
-            # 🚀 TIER 0: Nopecha (Highly Priority - Grid & Audio)
+            # 🚀 TIER 0: Nopecha (High Priority - Audio/OCR Optimized)
             # ────────────────────────────────────────────────────────
-            if self.nopecha_key and info["type"] in ["amazon_cvf", "amazon_audio"]:
-                # 1. Proactively switch from Grid to Audio for better success
-                if info["type"] == "amazon_cvf":
-                    logger.info("⚡ Priority: Attempting switch to Audio mode (Nopecha Optimized)")
-                    if self._switch_to_audio():
-                        time.sleep(1)
-                        info = self.detect() # Re-detect as audio
+            if self.nopecha_key and info["type"] in ["amazon_cvf", "amazon_audio", "amazon_text"]:
+                nopecha_success = False
                 
-                # 2. Solve via Nopecha (Audio or Grid)
-                element = info.get("element", element)
-                logger.info(f"Nopecha Solving Tier (Attempt {attempt}): {info['type']}")
-                if self._solve_nopecha(element, info):
-                    time.sleep(1)
-                    if not self.detect()["type"]:
-                        logger.success(f"✅ Resolved via Nopecha Priority Tier")
-                        return True
+                # 1. Proactively switch from Grid to Audio for better success with Nopecha
+                if info["type"] == "amazon_cvf":
+                    for switch_attempt in range(2):
+                        logger.info(f"⚡ Priority: Switching to Audio (Nopecha Optimized) - Attempt {switch_attempt + 1}")
+                        if self._switch_to_audio():
+                            # Wait for transition and re-detect
+                            for _ in range(3):
+                                time.sleep(1.5)
+                                info = self.detect()
+                                if info["type"] == "amazon_audio":
+                                    logger.info("✅ Successfully switched to Audio mode")
+                                    break
+                            if info["type"] == "amazon_audio":
+                                break
+                        time.sleep(1)
+
+                # 2. Iterative Nopecha Solve (Up to 5 tries within this tier)
+                for nope_try in range(5):
+                    if not info["type"]: break
+                    element = info.get("element")
+                    if not element: 
+                        info = self.detect()
+                        element = info.get("element")
+                    
+                    if not info["type"]: break
+                    
+                    logger.info(f"Nopecha Solve Tier (Attempt {attempt}, Try {nope_try + 1}): {info['type']}")
+                    if self._solve_nopecha(element, info):
+                        time.sleep(2) # Wait for processing
+                        post = self.detect()
+                        if not post["type"]:
+                            logger.success(f"✅ Resolved via Nopecha Priority Tier")
+                            return True
+                        else:
+                            logger.warning(f"Nopecha reported success but CAPTCHA still present (Type: {post['type']})")
+                            info = post # Update for next try
+                    else:
+                        logger.warning(f"Nopecha solve failed for {info['type']}")
+                        # If grid failed, try one last time to switch to audio if not already
+                        if info["type"] == "amazon_cvf" and nope_try == 0:
+                            self._switch_to_audio()
+                            time.sleep(2)
+                            info = self.detect()
+                
+                if not self.detect()["type"]: return True
+                logger.info("Nopecha Tier exhausted, falling back to other solvers...")
             
             # ────────────────────────────────────────────────────────
             # 📷 Tier 1: AI Vision (Fallback)

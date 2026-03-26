@@ -12,6 +12,7 @@ from loguru import logger
 from patchright.sync_api import sync_playwright
 from modules.config import ADSPOWER_API_URL
 from modules.persona_factory import PersonaFactory
+from modules.sanity_checks import run_all_checks
 
 class SanityCheckException(Exception):
     """Local exception for sanity check failures."""
@@ -163,11 +164,84 @@ class OpSecBrowserManager:
                 logger.debug(f"Could not verify browser state: {e}")
             
             logger.success("✅ Connected to browser via patchright")
+            
+            # Perform initial health check automatically
+            # self.check_fingerprint_health()
+            
             return self.page
             
         except Exception as e:
             logger.error(f"❌ Failed to connect via patchright: {e}")
             self.stop_browser()
+            return None
+            
+    def check_fingerprint_health(self):
+        """
+        Perform a comprehensive fingerprint health check to detect automation leaks.
+        Checks common bot detection vectors used by Arkose and other top-tier systems.
+        """
+        if not self.page:
+            return None
+            
+        logger.info("🛡️ Performing Fingerprint Health Check...")
+        try:
+            results = self.page.evaluate("""() => {
+                const getWebGL = () => {
+                    const canvas = document.createElement('canvas');
+                    const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+                    if (!gl) return { vendor: 'none', renderer: 'none' };
+                    const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
+                    if (!debugInfo) return { vendor: 'unknown', renderer: 'unknown' };
+                    return {
+                        vendor: gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL),
+                        renderer: gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL)
+                    };
+                };
+
+                return {
+                    webdriver: navigator.webdriver,
+                    plugins: navigator.plugins.length,
+                    languages: navigator.languages,
+                    platform: navigator.platform,
+                    hardware: navigator.hardwareConcurrency,
+                    memory: navigator.deviceMemory,
+                    webgl: getWebGL(),
+                    screen: `${window.screen.width}x${window.screen.height}`,
+                    outer: `${window.outerWidth}x${window.outerHeight}`,
+                    userAgent: navigator.userAgent
+                };
+            }""")
+
+            # LOG RESULTS FOR DEBUGGING
+            logger.info("📊 --- FINGERPRINT HEALTH REPORT ---")
+            logger.info(f"   🤖 WebDriver: {'❌ DETECTED (High Risk)' if results['webdriver'] else '✅ Hidden (Safe)'}")
+            logger.info(f"   🔌 Plugins: {results['plugins']} ({'✅ OK' if results['plugins'] > 10 else '⚠️ Minimal/Suspect'})")
+            logger.info(f"   🌍 Languages: {results['languages']}")
+            logger.info(f"   🏗️ WebGL Renderer: {results['webgl']['renderer']}")
+            logger.info(f"   💻 Platform: {results['platform']}")
+            logger.info(f"   🧠 Hardware: {results['hardware']} cores, {results['memory']}GB RAM")
+            logger.info(f"   🖥️ Resolution: {results['screen']} (Outer: {results['outer']})")
+            logger.info(f"   🕵️ User Agent: {results['userAgent'][:60]}...")
+            
+            # Additional Visual Verification
+            try:
+                 logger.info("🌐 Navigating to bot.sannysoft.com for visual audit...")
+                 # Open in a new tab to avoid disturbing current page if needed
+                 # but for debug, we can just use the current one before warmup
+                 self.page.goto("https://bot.sannysoft.com/", wait_until="domcontentloaded", timeout=15000)
+                 time.sleep(2)
+                 self.page.screenshot(path=f"logs/fingerprint_debug_{int(time.time())}.png")
+                 logger.success("📸 Visual fingerprint report saved to logs/")
+            except Exception as e:
+                 logger.warning(f"⚠️ Visual audit skipped: {e}")
+
+            # Critical Warning
+            if results['webdriver']:
+                logger.error("🚫 CRITICAL LEAK: navigator.webdriver is visible. CAPTCHA solve probability is < 5%.")
+            
+            return results
+        except Exception as e:
+            logger.debug(f"⚠️ Fingerprint check minor error: {e}")
             return None
     
     def stop_browser(self):
@@ -297,35 +371,42 @@ def run_phase_b_execution(profile_id, target_url, country_code, warmup_duration=
     manager = OpSecBrowserManager(profile_id)
     
     try:
-        # 1. Launch fresh browser session
-        page = manager.start_browser(headless=False)  # Visible for execution
-        if not page:
-            raise SanityCheckException("Failed to start browser")
-        
-        page.goto("about:blank", wait_until="domcontentloaded")
-        logger.info("📄 Ready for execution")
-        
-        # 2. Cookie Generation (The "Hidden Tracker" Fix)
-        # Unique history = Unique ad ID = No linking
-        if is_new_profile:
-            logger.info("🍪 New Profile Detected: Generating 'Natural' Cookies...")
-            generate_natural_history(page, country_code=country_code)
-
-        # 2b. Persona Generation (Cohesive Identity, Email, Phone, Pass)
-        # We generate this NOW so it's ready for the registration phase
+        # 1. Persona Generation (Cohesive Identity, Email, Phone, Pass)
+        # We generate this FIRST so the browser session starts as close as possible to navigation
         try:
             logger.info("🆔 Generating High-Fidelity Persona...")
             factory = PersonaFactory(catchall_domains=VERIFIED_DOMAINS)
             persona = factory.create_persona(country_code)
-            
             manager.persona = persona
-            
         except Exception as e:
-            logger.error(f"⚠️ Persona generation failed (non-critical, but impactful): {e}")
+            logger.error(f"⚠️ Persona generation failed: {e}")
+
+        # 2. Launch fresh browser session
+        page = manager.start_browser(headless=False)  # Visible for execution
+        if not page:
+            raise SanityCheckException("Failed to start browser")
         
-        # 3. Warm-up: Visit neutral site
-        logger.info(f"🌐 Warm-up: Visiting google.com for {warmup_duration}s...")
-        page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=15000)
+        # Diagnostics: detect premature closure
+        def _on_close(p):
+            logger.warning("📍 Browser/Page was CLOSED unexpectedly during Persona generation or Warm-up")
+        page.on("close", _on_close)
+
+        # Allow extra time for CDP to stabilize before heavy network load
+        time.sleep(1.5)
+
+        if page.is_closed():
+             logger.error("🛑 Page was closed before warm-up could start")
+             raise SanityCheckException("Page closed prematurely")
+
+        try:
+            # Using longer timeout and "commit" for faster/more robust initial jump
+            page.goto("https://www.google.com", wait_until="commit", timeout=20000)
+        except Exception as e:
+            logger.warning(f"⚠️ Initial warm-up jump failed: {e}. Retrying with about:blank first...")
+            # If Google fails, try another quick blank jump to see if browser is still alive
+            page.goto("about:blank")
+            time.sleep(1)
+            page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=20000)
         
         # Detect device type for HumanInput
         ua = page.evaluate("navigator.userAgent").lower()

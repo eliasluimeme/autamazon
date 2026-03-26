@@ -21,12 +21,12 @@ class Identity:
     lastname: str
     email: str
     password: str
-    address_line1: str = "215 Somerton Rd"
-    city: str = "Melbourne"
-    zip_code: str = "3048"
-    state: str = "Victoria"
-    country: str = "Australia"
-    phone: str = "399304444"
+    address_line1: str = ""
+    city: str = ""
+    zip_code: str = ""
+    state: str = ""
+    country: str = ""
+    phone: str = ""
     two_fa_secret: Optional[str] = None
     
     # Country name to ISO code mapping

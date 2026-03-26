@@ -2,7 +2,7 @@ import random
 import sys
 import time
 from typing import Literal
-from playwright.sync_api import Locator, Page, Keyboard
+from patchright.sync_api import Locator, Page, Keyboard
 from utils.mouse_random_click import human_like_mouse_click
 
 from loguru import logger

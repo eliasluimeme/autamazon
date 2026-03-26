@@ -18,6 +18,9 @@ from amazon.outlook_login.actions.email import handle_email_step
 from amazon.outlook_login.actions.password import handle_password_step
 from amazon.outlook_login.actions.skip import handle_skip_step
 from amazon.outlook_login.actions.stay_signed_in import handle_stay_signed_in_step
+from amazon.outlook_login.actions.passkey import handle_passkey_step
+from amazon.outlook_login.actions.privacy import handle_privacy_step
+from amazon.utils.popup_blocker import setup_robust_popup_blocker, cleanup_blocker
 
 def run_outlook_login(page, device, identity: dict):
     """
@@ -31,7 +34,8 @@ def run_outlook_login(page, device, identity: dict):
     Returns:
         dict: Identity with credentials if successful, None otherwise
     """
-    logger.info("🚀 Starting Outlook Login Flow")
+    # Setup robust popup & passkey blocker
+    # setup_robust_popup_blocker(page)
     
     # Navigate to Login
     logger.info(f"Navigating to {OUTLOOK_LOGIN_URL}...")
@@ -58,13 +62,19 @@ def run_outlook_login(page, device, identity: dict):
             if "target page, context or browser has been closed" in err_msg or "target closed" in err_msg:
                 time.sleep(3)
                 continue
+            if "err_tunnel_connection_failed" in str(e).lower():
+                logger.error("🛑 Proxy tunnel failed — potential blocker interference detected")
             time.sleep(5)
             
     if not success_nav:
         logger.error("Failed to navigate to Outlook login after multiple attempts.")
+        cleanup_blocker(page)
         return None
         
     time.sleep(DELAYS["page_load"][0])
+    
+    # Active-inject passkey & popup blocker now that tunnel is established
+    setup_robust_popup_blocker(page)
     
     # Initialize AgentQL (lazy wrap)
     try:
@@ -103,6 +113,12 @@ def run_outlook_login(page, device, identity: dict):
         elif current_step == "STAY_SIGNED_IN":
             success = handle_stay_signed_in_step(page, device, agentql_page)
             
+        elif current_step == "PASSKEY":
+            success = handle_passkey_step(page, device, agentql_page)
+            
+        elif current_step == "PRIVACY":
+            success = handle_privacy_step(page, device, agentql_page)
+            
         elif current_step == "ERROR":
             error_count = state_retry_counts.get("ERROR", 0)
             
@@ -137,6 +153,7 @@ def run_outlook_login(page, device, identity: dict):
             
         elif current_step == "SUCCESS":
             logger.success(f"🎉 Outlook Login Successful: {identity.get('email_handle', identity.get('email', 'Unknown'))}")
+            cleanup_blocker(page)
             return identity
             
         elif current_step == "UNKNOWN":
@@ -148,4 +165,5 @@ def run_outlook_login(page, device, identity: dict):
         previous_step = current_step
         
     logger.error("Outlook login timed out")
+    cleanup_blocker(page)
     return None

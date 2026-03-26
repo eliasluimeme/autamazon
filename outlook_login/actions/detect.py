@@ -146,6 +146,8 @@ def _detect_via_cache(page) -> str:
         "EMAIL": "login_email_input",
         "PASSWORD": "login_password_input",
         "SKIP": "login_skip_button",
+        "PASSKEY": "login_passkey_skip_button",
+        "PRIVACY": "login_privacy_ok_button",
         "STAY_SIGNED_IN": "login_stay_signed_in_yes",
     }
     
@@ -161,10 +163,38 @@ def _detect_via_selectors(page) -> str:
     # Success check
     try:
         url = page.url.lower()
-        exclusions = ["interruption", "passkey", "login"]
+        exclusions = ["interruption", "passkey", "login", "privacynotice", "fido"]
         if "account.microsoft.com" in url or "outlook.live.com/mail" in url:
             if not any(excl in url for excl in exclusions):
                 return "SUCCESS"
+    except: pass
+
+    # Passkey / Interruption check
+    try:
+        url = page.url.lower()
+        if any(p in url for p in ("interrupt", "passkey", "fido/create", "fido/enroll")):
+            return "PASSKEY"
+
+        # Content check for passkey
+        try:
+            page_content = page.content().lower()
+            passkey_patterns = ["setting up your passkey", "create a passkey", "go passwordless", "use a passkey"]
+            if any(p in page_content for p in passkey_patterns):
+                return "PASSKEY"
+        except: pass
+
+        # Cancel button check for passkey
+        if page.locator(SELECTORS["passkey"]["cancel_button"]).first.is_visible(timeout=300):
+            # Check if we are really on a passkey page (no login form)
+            if not page.locator(SELECTORS["email"]["input"]).first.is_visible(timeout=200):
+                return "PASSKEY"
+    except: pass
+
+    # Privacy notice check
+    try:
+        url = page.url.lower()
+        if "privacynotice" in url or "privacy" in url:
+            return "PRIVACY"
     except: pass
     
     try:
@@ -231,6 +261,16 @@ def _detect_via_agentql(page, agentql_page) -> str:
             if DOMPATH_AVAILABLE:
                 extract_and_cache_xpath(response.stay_signed_in_yes_button, "login_stay_signed_in_yes", {"step": "detect"})
             return "STAY_SIGNED_IN"
+
+        if response.passkey_skip_button:
+            if DOMPATH_AVAILABLE:
+                extract_and_cache_xpath(response.passkey_skip_button, "login_passkey_skip_button", {"step": "detect"})
+            return "PASSKEY"
+
+        if response.privacy_ok_button:
+            if DOMPATH_AVAILABLE:
+                extract_and_cache_xpath(response.privacy_ok_button, "login_privacy_ok_button", {"step": "detect"})
+            return "PRIVACY"
 
     except Exception as e:
         logger.warning(f"AgentQL login detection failed: {e}")

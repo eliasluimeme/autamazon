@@ -26,7 +26,8 @@ class SessionState:
             "amazon_signup": False,
             "dev_registration": False,
             "2fa_enabled": False,
-            "idv_submitted": False
+            "idv_submitted": False,
+            "dropped_on_phone": False,
         }
         self.identity: Identity | None = None
         self.metadata: dict = {}   # arbitrary key-value store (e.g. failure reasons)

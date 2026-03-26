@@ -29,12 +29,29 @@ def detect_cart_state(page) -> str:
         
     # 3. Product Page (Has 1-Click Buy)
     try:
-        if "/dp/" in url or page.locator("#buy-now-button, #one-click-button").is_visible(timeout=500):
+        # Desktop Amazon often uses different IDs and multiple buy boxes.
+        # We check for common Kindle/eBook buy now elements.
+        product_selectors = [
+            "#buy-now-button", 
+            "#one-click-button",
+            "input[name='submit.buy-now']",
+            "input[name='submit.one-click-checkout']",
+            "#add-to-cart-button", # Sometimes present even if we want 1-click
+            "[id*='BuyNow']",
+            "[id*='OneClick']"
+        ]
+        
+        # Combined check for faster detection
+        if "/dp/" in url:
             return "product_page"
+            
+        for sel in product_selectors:
+            if page.locator(sel).first.is_visible(timeout=800):
+                return "product_page"
     except Exception: pass
         
     # 4. Search Results / Storefront
-    if "/amz-books/store" in url or "s?k=" in url:
+    if "/amz-books/store" in url or "s?k=" in url or "/kindle-dbs/" in url:
         return "storefront"
         
     return "unknown"
@@ -67,7 +84,7 @@ def run_ebook_search_flow(playwright_page, device, session: SessionState) -> boo
                 try:
                     if playwright_page.is_closed():
                         return False
-                    playwright_page.goto(KINDLE_STORE_URL, wait_until="domcontentloaded", timeout=30000)
+                    playwright_page.goto(KINDLE_STORE_URL, wait_until="domcontentloaded", timeout=45000)
                     time.sleep(2)
                     break
                 except Exception as e:
@@ -87,14 +104,25 @@ def run_ebook_search_flow(playwright_page, device, session: SessionState) -> boo
                     time.sleep(0.5)
             except: pass
             
-            # Select random book link
+            # Select random book link (Enhanced with Desktop Selectors)
             book_selectors = [
+                 # Desktop Standard Search Results
+                 "div.s-result-item[data-component-type='s-search-result'] a.a-link-normal.s-no-outline",
+                 "div.s-result-item h2 a.a-link-normal",
+                 "a.a-link-normal.s-underline-text.s-underline-link-text.s-link-style.a-text-normal",
+                 
+                 # Desktop Storefront / Carousel
+                 "a.octopus-pc-asin-link",
+                 "div.octopus-pc-card-content a",
+                 "li.octopus-pc-item a",
+                 "[data-asin] a.a-link-normal",
+                 
+                 # Mobile / Legacy
                  "xpath=//*[@id='mobile-books-storefront_ClickPicksStrategy']//bds-unified-book-faceout//div/a",
                  "xpath=//*[@id='mobile-books-storefront_KDDDailyDealsGMS']//bds-unified-book-faceout//div/a",
                  "bds-unified-book-faceout a",
                  "bds-carousel-item a[href*='/dp/']",
-                 "div[class*='faceout'] a",
-                 "div.s-result-item[data-component-type='s-search-result'] a.a-link-normal.s-no-outline"
+                 "div[class*='faceout'] a"
             ]
             
             selected_link = None
@@ -104,8 +132,12 @@ def run_ebook_search_flow(playwright_page, device, session: SessionState) -> boo
                     valid_links = []
                     for link in elements:
                         try:
+                            # Filter out links that don't look like product links
+                            href = link.get_attribute("href")
+                            if not href or "/dp/" not in href: continue
+                            
                             box = link.bounding_box()
-                            if box and box['width'] > 50 and box['height'] > 50:
+                            if box and box['width'] > 30 and box['height'] > 30:
                                 valid_links.append(link)
                         except: continue
                     if valid_links:
@@ -120,7 +152,7 @@ def run_ebook_search_flow(playwright_page, device, session: SessionState) -> boo
                 
                 # Execute efficient click
                 device.js_click(selected_link, "Random eBook Link")
-                time.sleep(3)
+                time.sleep(4)
                 continue
             else:
                 # Use standard interaction engine for AgentQL fallback
@@ -131,22 +163,39 @@ def run_ebook_search_flow(playwright_page, device, session: SessionState) -> boo
                     biomechanical=False
                 )
                 if success:
-                    time.sleep(3)
+                    time.sleep(4)
                 else:
                     logger.error("Failed to click any eBook. Retrying navigation...")
                     playwright_page.goto(KINDLE_STORE_URL)
                     
         elif state == "product_page":
-            # Execute Buy Now
+            # Execute Buy Now (Enhanced with Desktop Selectors)
             initial_url = playwright_page.url
             success = interaction.smart_click(
                 description="Buy now with 1-Click Button",
                 selectors=[
+                    # Standard Desktop IDs
                     "#one-click-button",
-                    "xpath=//*[@id='one-click-button']",
+                    "#buy-now-button",
+                    
+                    # Desktop Variants (Name based)
+                    "input[name='submit.one-click-checkout']",
                     "input[name='submit.buy-now']",
-                    "#buy-now-button", 
+                    "input[name='submit.one-click-checkout-button']",
+                    
+                    # Data Actions (Modern Amazon)
+                    "[data-action='one-click-checkout']",
+                    "[data-action='one-click-checkout-button']",
+                    
+                    # CSS based (Text)
                     "span.a-button-inner:has-text('Buy now with 1-Click')",
+                    "span.a-button-inner:has-text('Buy now')",
+                    "button#one-click-button-announce",
+                    "button:has-text('Buy now with 1-Click')",
+                    
+                    # XPath positional (Last resort)
+                    "xpath=//*[@id='one-click-button']",
+                    "xpath=//input[contains(@id, 'buy-now') or contains(@id, 'one-click')]"
                 ],
                 agentql_query="{ buy_now_1_click_button }",
                 cache_key="buy_now_1_click",

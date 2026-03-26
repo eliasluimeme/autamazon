@@ -141,14 +141,47 @@ def detect_signup_state(page, agentql_page=None) -> str:
         logger.error("🛑 Browser network error detected (Amazon unreachable).")
         return "error"
         
+    start_time = time.time()
     url = page.url.lower()
     
     # ============================================================
-    # 🔑 Priority 0.5: Try Cached Detectors (Fastest)
+    # 🔑 URL-Based Priority Routing (Massive Speedup)
+    # If the URL already tells us where we probably are, check that first!
+    # ============================================================
+    logger.debug(f"Detecting state for URL: {url}")
+    
+    # 1. Signin / Login Entry
+    if "/ap/signin" in url:
+        state = _detect_core_flow(page)
+        if state in ["email_signin_entry", "signin_choice"]:
+            logger.info(f"🚀 Fast-tracked state detection via URL (/ap/signin): {state} ({time.time() - start_time:.2f}s)")
+            return state
+
+    # 2. Registration Form
+    if "/ap/register" in url:
+        state = _detect_core_flow(page)
+        if state == "registration_form":
+            logger.info(f"🚀 Fast-tracked state detection via URL (/ap/register): {state} ({time.time() - start_time:.2f}s)")
+            return state
+
+    # 3. Verification / OTP / Mobile
+    if "/ap/cvf" in url or "verification" in url:
+        state = _detect_verification(page)
+        if state:
+            logger.info(f"🚀 Fast-tracked state detection via URL (verification): {state} ({time.time() - start_time:.2f}s)")
+            return state
+
+    # 4. New Customer Intent
+    if "/ax/claim/intent" in url:
+        logger.info(f"🚀 Fast-tracked state detection via URL (intent): new_customer_intent ({time.time() - start_time:.2f}s)")
+        return "new_customer_intent"
+
+    # ============================================================
+    # 🔑 Priority 0.5: Try Cached Detectors (Fallback)
     # ============================================================
     state = _detect_via_cache(page)
     if state:
-        logger.debug(f"Detected State via Cache: {state}")
+        logger.debug(f"Detected State via Cache: {state} ({time.time() - start_time:.2f}s)")
         return state
 
     # ============================================================
@@ -293,6 +326,20 @@ def _detect_verification(page) -> str | None:
     url = page.url.lower()
     
     # ============================================================
+    # 🔑 NEW: High-priority check for add_mobile via URL and text
+    # This prevents the generic /ap/cvf check from misidentifying it.
+    # ============================================================
+    if "/ap/cvf/verify" in url or "/ap/cvf/phone" in url:
+        # Check text to be absolutely sure
+        for indicator in AMAZON_SELECTORS["verification"]["add_mobile"]:
+            try:
+                if page.locator(indicator).first.is_visible(timeout=500):
+                    return "add_mobile"
+            except: pass
+        # DO NOT return "add_mobile" as fallback here anymore to avoid false positives
+        # Fall through to standard detector or puzzle detector
+
+    # ============================================================
     # 🔑 CRITICAL: Check for PUZZLE first even on /ap/cvf URLs!
     # The puzzle page is at /ap/cvf/request?arb=... and has
     # "Solve this puzzle" text. We must detect it BEFORE verification.
@@ -355,18 +402,18 @@ def _detect_verification(page) -> str | None:
     
     # Standard /ap/cvf URL (no arb=) - return verification after add_mobile check
     if "/ap/cvf" in url or "verification" in url:
+         # Double check for mobile one last time by text
+        for indicator in AMAZON_SELECTORS["verification"]["add_mobile"]:
+             try:
+                 if page.locator(indicator).first.is_visible(timeout=500):
+                     return "add_mobile"
+             except: pass
         return "verification"
+    
     for sel in AMAZON_SELECTORS["verification"]["otp"]:
         try:
             if page.locator(sel).first.is_visible(timeout=200):
                 return "verification"
-        except:
-            pass
-            
-    for sel in AMAZON_SELECTORS["verification"]["add_mobile"]:
-        try:
-            if page.locator(sel).first.is_visible(timeout=200):
-                return "add_mobile"
         except:
             pass
             

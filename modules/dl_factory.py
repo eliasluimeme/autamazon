@@ -1,4 +1,6 @@
 import os
+import time
+
 import json
 import numpy as np
 import random
@@ -23,12 +25,20 @@ class DLFactory:
     
     The original text is completely HIDDEN to ensure no overlaps.
     """
-    def __init__(self, config_path: str = "/Users/elias/Documents/GitHub/amazon/configs/dl_templates.json"):
-        self.base_dir = Path("/Users/elias/Documents/GitHub/amazon/data/DL")
+    def __init__(self, config_path: Optional[str] = None):
+        # Determine project root relative to this file (modules/dl_factory.py)
+        self.project_root = Path(__file__).resolve().parent.parent
+        
+        self.base_dir = self.project_root / "data" / "DL"
         self.images_dir = self.base_dir / "images"
-        self.output_dir = Path("/Users/elias/Documents/GitHub/amazon/outputs/dl")
+        self.output_dir = self.project_root / "outputs" / "dl"
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        if not config_path:
+            config_path = str(self.project_root / "configs" / "dl_templates.json")
+            
         self.config = self._load_config(config_path)
+        self._font_cache: Dict[str, Path] = {}
 
     def _load_config(self, path: str) -> Dict:
         if not os.path.exists(path):
@@ -66,10 +76,14 @@ class DLFactory:
             return ImageFont.truetype(str(font_path), size)
         
         # 2. Search GLOBALLY in the base DL directory
+        if font_name in self._font_cache:
+            return ImageFont.truetype(str(self._font_cache[font_name]), size)
+
         try:
-            # Recursive glob can be slow, but we need it since fonts can be in nested folders
+            # Recursive glob can be slow, cache the result
             global_path = next(self.base_dir.glob(f"**/{font_name}"), None)
             if global_path: 
+                self._font_cache[font_name] = global_path
                 logger.info(f"Loaded font '{font_name}' from: {global_path.parent.name}")
                 return ImageFont.truetype(str(global_path), size)
         except Exception: 
@@ -89,7 +103,7 @@ class DLFactory:
         choice = str(random.choice(photos))
         return choice
 
-    def _get_random_bg(self, width: int, height: int) -> Optional[Image.Image]:
+    def get_random_bg(self, width: int, height: int) -> Optional[Image.Image]:
         """Load a random desk/scene background from data/DL/bg/, resized to canvas dims."""
         bg_dir = self.base_dir / "bg"
         if not bg_dir.exists():
@@ -106,11 +120,16 @@ class DLFactory:
         logger.info(f"Using scene background: {choice.name}")
         return bg
 
-    def _apply_bg(self, card: Image.Image, width: int, height: int) -> Image.Image:
-        """Composite card RGBA over a random desk background."""
-        bg = self._get_random_bg(width, height)
+    def _apply_bg(self, card: Image.Image, width: int, height: int, bg_image: Optional[Image.Image] = None) -> Image.Image:
+        """Composite card RGBA over a desk background."""
+        bg = bg_image if bg_image else self.get_random_bg(width, height)
         if not bg:
             return card
+        
+        # Ensure background matches target dimensions if it was passed in
+        if bg.size != (width, height):
+            bg = ImageOps.fit(bg, (width, height), method=Image.Resampling.LANCZOS)
+            
         card_rgba = card.convert("RGBA")
         bg.paste(card_rgba, (0, 0), card_rgba)
         return bg
@@ -240,7 +259,7 @@ class DLFactory:
         
         return img
 
-    def create_license(self, identity: Dict[str, Any]) -> Optional[str]:
+    def create_license(self, identity: Dict[str, Any], bg_image: Optional[Image.Image] = None) -> Optional[str]:
         country_code = identity.get("country", "GB").upper()
         country_config = None
         resolved_code = country_code
@@ -255,17 +274,10 @@ class DLFactory:
         if not template_psd: return None
             
         logger.info(f"Replacing PSD Text on: {template_psd.name}")
+        start_opening = time.time()
         psd = PSDImage.open(template_psd)
         
-        # 0. RESOLVE and HIDE
-        # First, hide ALL descendants except things that look like background
-        for layer in psd.descendants():
-            # If it's a layer we want to keep (bg), leave it.
-            # Usually 'bg' or 'Layer 3' or the bottom-most pixel layer.
-            if layer.kind in ['type', 'pixel', 'smartobject'] and 'BG' not in layer.name.upper():
-                 layer.visible = False
-
-        # Determine Resolution/Version
+        # Determine Resolution/Version once
         version_cfg = None
         for vname, vdata in country_config.get("versions", {}).items():
             if vdata.get("min_width", 0) <= psd.width <= vdata.get("max_width", 99999):
@@ -275,64 +287,66 @@ class DLFactory:
             logger.error(f"No version config found in templates for PSD width {psd.width}")
             return None
 
-        # 1. DISCOVERY Mode: Collect ALL type layers even if hidden
+        # 1. SINGLE-PASS Layer Management and Discovery
         type_pool = []
-        for l in psd.descendants():
-            if l.kind == 'type':
+        top_layers = []
+        
+        # We'll hide everything except BG layers initially
+        for layer in psd.descendants():
+            name_upper = layer.name.upper()
+            
+            # Identify Top Overlays (Holograms, Seals, etc.)
+            if any(kw in name_upper for kw in ['HOLO', 'SEAL', 'VICROADS', 'STAMP', 'CREST']):
+                if layer.kind == 'pixel' and 'SIGN' not in name_upper:
+                    top_layers.append(layer)
+            
+            # Identification and Visibility
+            if layer.kind == 'type':
                 type_pool.append({
-                    "name": l.name.upper(),
-                    "text": l.text.strip().upper(),
-                    "bbox": l.bbox,
-                    "layer": l
+                    "name": name_upper,
+                    "text": layer.text.strip().upper(),
+                    "bbox": layer.bbox,
+                    "layer": layer
                 })
+                layer.visible = False
+            elif layer.kind in ['pixel', 'smartobject']:
+                if 'BG' not in name_upper:
+                    layer.visible = False
         
-        # Sort by position (X then Y) to handle duplicate text consistently
-        type_pool.sort(key=lambda x: (x["bbox"][0], x["bbox"][1]))
-        
+        logger.info(f"Single-pass PSD crawl took {time.time() - start_opening:.2f}s")
+
         # Identity-Field to Coordinate Mapping
         active_replacement_map = {}
         layer_map = version_cfg.get("layer_map", {})
         
+        type_pool.sort(key=lambda x: (x["bbox"][0], x["bbox"][1]))
+        
         for field, m_cfg in layer_map.items():
             placeholder = m_cfg["placeholder"].upper()
             index = m_cfg.get("index", 0)
-            
-            # Find matching instances in pool
             matches = [t for t in type_pool if t["name"] == placeholder or t["text"] == placeholder]
             if matches and index < len(matches):
                 target = matches[index]
                 active_replacement_map[field] = {
                     "pos": (target["bbox"][0], target["bbox"][1]),
-                    "right": target["bbox"][2],  # right edge for right-alignment
-                    "size": target["bbox"][3] - target["bbox"][1] # height
+                    "right": target["bbox"][2],
+                    "size": target["bbox"][3] - target["bbox"][1]
                 }
-                logger.debug(f"Matched field '{field}' to layer text '{placeholder}' (index {index}) at {target['bbox'][0]},{target['bbox'][1]}")
-
-        # 2. Composite BASE (BG only)
-        # Hide almost everything for the clean composite
-        for layer in psd.descendants():
-            if layer.kind in ['type', 'pixel', 'smartobject'] and 'BG' not in layer.name.upper():
-                layer.visible = False
         
+        # 2. Base Composite (Hiding is already done in first pass)
+        start_composite = time.time()
         img = psd.composite()
+        logger.info(f"PSD base composite took {time.time() - start_composite:.2f}s")
         draw = ImageDraw.Draw(img)
 
-        # 3. Enhanced Rendering Loop (Photos, Sigs, Text)
+        # 3. Enhanced Rendering Loop
+        start_fill = time.time()
         self._fill_enhanced(img, draw, identity, template_psd.parent, version_cfg, active_replacement_map)
+        logger.info(f"Fill enhanced took {time.time() - start_fill:.2f}s")
         
-        # 4. Re-apply Top-level PSD Overlays (Holograms, Seal)
-        # We find layers that should be ON TOP of everything (like the seal)
-        top_layers = []
-        for layer in psd.descendants():
-             # Layers often used as overlays/holograms
-             if any(kw in layer.name.upper() for kw in ['HOLO', 'SEAL', 'VICROADS', 'STAMP', 'CREST']):
-                 if layer.kind == 'pixel' and 'SIGN' not in layer.name.upper():
-                     top_layers.append(layer)
-        
+        # 4. Re-apply Top-level PSD Overlays
         for t_layer in top_layers:
             try:
-                # Composite the single layer and paste as overlay
-                # We use opacity from PSD
                 overlay = t_layer.composite()
                 img.paste(overlay, (t_layer.left, t_layer.top), overlay)
                 logger.info(f"Re-applied overlay layer: {t_layer.name}")
@@ -343,7 +357,7 @@ class DLFactory:
         img = self._apply_card_texture(img)
 
         # 6. Place card over random scene background
-        img = self._apply_bg(img, psd.width, psd.height)
+        img = self._apply_bg(img, psd.width, psd.height, bg_image=bg_image)
 
         # 7. Save
         output_name = f"DL_{identity.get('last_name', 'Anon')}_{country_code}.png"
@@ -352,7 +366,7 @@ class DLFactory:
         logger.info(f"Generated: {output_path}")
         return str(output_path)
 
-    def create_license_back(self, identity: Dict[str, Any]) -> Optional[str]:
+    def create_license_back(self, identity: Dict[str, Any], bg_image: Optional[Image.Image] = None) -> Optional[str]:
         """Generate the back side of an Australian driving licence."""
         country_code = identity.get("country", "AU").upper()
         country_config = None
@@ -389,21 +403,27 @@ class DLFactory:
             logger.error(f"No back version config matched PSD width {psd.width}")
             return None
 
-        # DISCOVERY: collect ALL type layers (visible or not), sorted left-to-right
+        # 1. SINGLE-PASS: collect ALL type layers and hide placeholders
+        layer_map = version_cfg.get("layer_map", {})
+        placeholders = {m["placeholder"].upper() for m in layer_map.values()}
+        
         type_pool = []
         for l in psd.descendants():
             if l.kind == "type":
+                name_upper = l.name.upper()
+                text_upper = l.text.strip().upper()
                 type_pool.append({
-                    "name": l.name.upper(),
-                    "text": l.text.strip().upper(),
+                    "name": name_upper,
+                    "text": text_upper,
                     "bbox": l.bbox,
                     "layer": l,
                 })
+                if name_upper in placeholders or text_upper in placeholders:
+                    l.visible = False
+        
         type_pool.sort(key=lambda x: (x["bbox"][0], x["bbox"][1]))
-
+        
         active_replacement_map = {}
-        layers_to_hide = []          # only the placeholder layers we are replacing
-        layer_map = version_cfg.get("layer_map", {})
         for field, m_cfg in layer_map.items():
             placeholder = m_cfg["placeholder"].upper()
             index = m_cfg.get("index", 0)
@@ -413,17 +433,9 @@ class DLFactory:
                 active_replacement_map[field] = {
                     "pos": (target["bbox"][0], target["bbox"][1]),
                     "size": target["bbox"][3] - target["bbox"][1],
-                    "layer": target["layer"],
                 }
-                layers_to_hide.append(target["layer"])
-                logger.debug(f"[BACK] Matched '{field}' -> '{placeholder}' idx={index} at {target['bbox'][0]},{target['bbox'][1]}")
 
-        # Hide ONLY the placeholder layers we intend to replace.
-        # All other layers (static labels, conditions text, card artwork) stay visible
-        # so the full authentic background composites correctly.
-        for layer in layers_to_hide:
-            layer.visible = False
-
+        # 2. Composite Background (with placeholders hidden)
         img = psd.composite()
         draw = ImageDraw.Draw(img)
 
@@ -463,7 +475,7 @@ class DLFactory:
         img = self._apply_card_texture(img)
 
         # Place card over random scene background
-        img = self._apply_bg(img, psd.width, psd.height)
+        img = self._apply_bg(img, psd.width, psd.height, bg_image=bg_image)
 
         output_name = f"DL_{identity.get('last_name', 'Anon')}_{country_code}_BACK.png"
         output_path = self.output_dir / output_name
@@ -472,7 +484,7 @@ class DLFactory:
         return str(output_path)
 
     def _fill_enhanced(self, img: Image.Image, draw: ImageDraw.Draw, identity: Dict, folder: Path, cfg: Dict, discovered: Dict):
-        print(f"DEBUG: Starting _fill_enhanced for {identity.get('last_name')}")
+        logger.debug(f"Starting _fill_enhanced for {identity.get('last_name')}")
         """Replacement logic with adaptive font sizing and color matching."""
         
         # 1. Assets (Draw FIRST so text overlays them like in real licenses)
@@ -603,10 +615,11 @@ class DLFactory:
 if __name__ == "__main__":
     factory = DLFactory()
     test_id = {
-        "first_name": "JOHN", "last_name": "CITIZEN",
-        "dob_day": "16", "dob_month": "03", "dob_year": "1984",
+        "first_name": "ELIAS", "last_name": "SIMON",
+        "dob_day": "12", "dob_month": "11", "dob_year": "1992",
         "address": "77 SAMPLE PARADE", "city_state_zip": "KEW EAST VIC 3102",
         "license_num": "9876543", "country": "AU",
     }
-    factory.create_license(test_id)
-    factory.create_license_back(test_id)
+    shared_bg = factory.get_random_bg(3000, 2000)
+    factory.create_license(test_id, bg_image=shared_bg.copy() if shared_bg else None)
+    factory.create_license_back(test_id, bg_image=shared_bg.copy() if shared_bg else None)

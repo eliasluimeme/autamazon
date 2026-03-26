@@ -1,0 +1,379 @@
+- [Onlinesim API](https://onlinesim.io/openapi_docs/onlinesim-api-un/info)
+- [Alternative API](https://onlinesim.io/openapi_docs/alternative-api-un/info)
+- [Reseller API](https://onlinesim.io/openapi_docs/reseller-api-un/info)
+[Onlinesim API](https://onlinesim.io/openapi_docs/onlinesim-api-un/info)
+[Alternative API](https://onlinesim.io/openapi_docs/alternative-api-un/info)
+[Reseller API](https://onlinesim.io/openapi_docs/reseller-api-un/info)
+- [English](https://onlinesim.io/openapi_docs/onlinesim-api-un/info)
+- [Русский](https://onlinesim.io/ru/openapi_docs/onlinesim-api-un/info)
+[English](https://onlinesim.io/openapi_docs/onlinesim-api-un/info)
+[Русский](https://onlinesim.io/ru/openapi_docs/onlinesim-api-un/info)
+- [Info](https://onlinesim.io/openapi_docs/onlinesim-api-un/info)
+- [Authorization](https://onlinesim.io/openapi_docs/onlinesim-api-un/auth)
+- [Components](https://onlinesim.io/openapi_docs/onlinesim-api-un/components)
+- webhooks
+- single-service activations
+- rent
+- profile
+- free numbers
+[Info](https://onlinesim.io/openapi_docs/onlinesim-api-un/info)
+[Authorization](https://onlinesim.io/openapi_docs/onlinesim-api-un/auth)
+[Components](https://onlinesim.io/openapi_docs/onlinesim-api-un/components)
+
+# get getTariffs
+
+```
+https://onlinesim.io/api/getTariffs.php
+```
+
+This request will provide you Onlinesim tariff list for single-service activations.
+It is actually a representation of a service list ("Buy a number" section) located in the user dashboard.
+
+## Servers
+```
+https://onlinesim.io
+```
+
+## Security
+- [apikey](https://onlinesim.io/openapi_docs/onlinesim-api-un/components#apikey)
+- [apikey](https://onlinesim.io/openapi_docs/onlinesim-api-un/components#apikey)
+- [BearerAuth](https://onlinesim.io/openapi_docs/onlinesim-api-un/components#BearerAuth)
+- [BearerAuth](https://onlinesim.io/openapi_docs/onlinesim-api-un/components#BearerAuth)
+- [OAuth2sms-scope](https://onlinesim.io/openapi_docs/onlinesim-api-un/components#OAuth2)
+- [OAuth2sms-scope](https://onlinesim.io/openapi_docs/onlinesim-api-un/components#OAuth2)
+- sms-scope
+- [apikey](https://onlinesim.io/openapi_docs/onlinesim-api-un/components#apikey)
+[apikey](https://onlinesim.io/openapi_docs/onlinesim-api-un/components#apikey)
+- [BearerAuth](https://onlinesim.io/openapi_docs/onlinesim-api-un/components#BearerAuth)
+[BearerAuth](https://onlinesim.io/openapi_docs/onlinesim-api-un/components#BearerAuth)
+- [OAuth2sms-scope](https://onlinesim.io/openapi_docs/onlinesim-api-un/components#OAuth2)
+- sms-scope
+[OAuth2sms-scope](https://onlinesim.io/openapi_docs/onlinesim-api-un/components#OAuth2)
+- sms-scope
+
+```
+sms-scope
+```
+
+## Parameters
+```
+locale_price
+```
+
+
+```
+query
+```
+
+- stringExample: "string"
+
+```
+"string"
+```
+
+
+```
+country
+```
+
+
+```
+query
+```
+
+- stringExample: "string"
+
+```
+"string"
+```
+
+
+```
+filter_country
+```
+
+
+```
+query
+```
+
+- stringExample: "string"
+
+```
+"string"
+```
+
+
+```
+filter_service
+```
+
+
+```
+query
+```
+
+- stringExample: "string"
+
+```
+"string"
+```
+
+
+```
+count
+```
+
+
+```
+query
+```
+
+- stringExample: "string"
+
+```
+"string"
+```
+
+
+```
+page
+```
+
+
+```
+query
+```
+
+- stringExample: "string"
+
+```
+"string"
+```
+
+
+```
+lang
+```
+
+Response language:
+fr - French,
+
+```
+fr
+```
+
+de - German,
+
+```
+de
+```
+
+ru - Russian,
+
+```
+ru
+```
+
+en - English,
+
+```
+en
+```
+
+zh - Chinese. Please note that the translation applies only to string field values, such as service names or country names. Field names themselves, error messages, and standard values (for example, true/false for boolean fields) remain in English.
+
+```
+zh
+```
+
+
+```
+query
+```
+
+- stringExample: "en"Enum: fr de ru en zh 
+
+```
+"en"
+```
+
+
+```
+fr
+```
+
+
+```
+de
+```
+
+
+```
+ru
+```
+
+
+```
+en
+```
+
+
+```
+zh
+```
+
+### 200
+
+- application/json
+- Schema
+- objectExample: {"response":1,"countries":{"country_code":{"name":"string","original":"string","code":0,"pos":0,"other":true,"new":true,"enable":true}},"services":{"service_name":{"id":0,"count":0,"price":"string","service":"string","slug":"string"}},"favorite_countries":{},"favorite_services":[{}],"page":0,"country":0,"filter":"string","end":true,"favorites":{}}Properties: responsemixed1, if the request has been completed successfully, or an error messageExample: 1One Of:integerExample: 0stringExample: "string"countriesobjectExample: {"country_code":{"name":"string","original":"string","code":0,"pos":0,"other":true,"new":true,"enable":true}}servicesobjectExample: {"service_name":{"id":0,"count":0,"price":"string","service":"string","slug":"string"}}favorite_countriesobjectList of favorite countries (country can be added to your favorites in the user dashboard by clicking pin icon in the country list)Example: {}favorite_servicesarrayExample: [{}]Items:objectList of favorite services (service can be added to your favorites in the user dashboard by clicking pin icon in the service list)Example: {}pageintegerPagination index (for navigation)Example: 0countryintegerSelected countryExample: 0filterstringList of enabled filtersExample: "string"endbooleanCheck if this page is the last one (auxiliary parameter for navigation)Example: truefavoritesobjectFavorites listExample: {}
+- responsemixed1, if the request has been completed successfully, or an error messageExample: 1One Of:integerExample: 0stringExample: "string"
+- integerExample: 0
+- stringExample: "string"
+- countriesobjectExample: {"country_code":{"name":"string","original":"string","code":0,"pos":0,"other":true,"new":true,"enable":true}}
+- servicesobjectExample: {"service_name":{"id":0,"count":0,"price":"string","service":"string","slug":"string"}}
+- favorite_countriesobjectList of favorite countries (country can be added to your favorites in the user dashboard by clicking pin icon in the country list)Example: {}
+- favorite_servicesarrayExample: [{}]Items:objectList of favorite services (service can be added to your favorites in the user dashboard by clicking pin icon in the service list)Example: {}
+- objectList of favorite services (service can be added to your favorites in the user dashboard by clicking pin icon in the service list)Example: {}
+- pageintegerPagination index (for navigation)Example: 0
+- countryintegerSelected countryExample: 0
+- filterstringList of enabled filtersExample: "string"
+- endbooleanCheck if this page is the last one (auxiliary parameter for navigation)Example: true
+- favoritesobjectFavorites listExample: {}
+
+```
+{"response":1,"countries":{"country_code":{"name":"string","original":"string","code":0,"pos":0,"other":true,"new":true,"enable":true}},"services":{"service_name":{"id":0,"count":0,"price":"string","service":"string","slug":"string"}},"favorite_countries":{},"favorite_services":[{}],"page":0,"country":0,"filter":"string","end":true,"favorites":{}}
+```
+
+- responsemixed1, if the request has been completed successfully, or an error messageExample: 1One Of:integerExample: 0stringExample: "string"
+- integerExample: 0
+- stringExample: "string"
+- countriesobjectExample: {"country_code":{"name":"string","original":"string","code":0,"pos":0,"other":true,"new":true,"enable":true}}
+- servicesobjectExample: {"service_name":{"id":0,"count":0,"price":"string","service":"string","slug":"string"}}
+- favorite_countriesobjectList of favorite countries (country can be added to your favorites in the user dashboard by clicking pin icon in the country list)Example: {}
+- favorite_servicesarrayExample: [{}]Items:objectList of favorite services (service can be added to your favorites in the user dashboard by clicking pin icon in the service list)Example: {}
+- objectList of favorite services (service can be added to your favorites in the user dashboard by clicking pin icon in the service list)Example: {}
+- pageintegerPagination index (for navigation)Example: 0
+- countryintegerSelected countryExample: 0
+- filterstringList of enabled filtersExample: "string"
+- endbooleanCheck if this page is the last one (auxiliary parameter for navigation)Example: true
+- favoritesobjectFavorites listExample: {}
+
+```
+response
+```
+
+
+```
+1
+```
+
+- integerExample: 0
+- stringExample: "string"
+
+```
+0
+```
+
+
+```
+"string"
+```
+
+
+```
+countries
+```
+
+### 200
+
+```
+{"country_code":{"name":"string","original":"string","code":0,"pos":0,"other":true,"new":true,"enable":true}}
+```
+
+
+```
+services
+```
+
+
+```
+{"service_name":{"id":0,"count":0,"price":"string","service":"string","slug":"string"}}
+```
+
+
+```
+favorite_countries
+```
+
+
+```
+{}
+```
+
+
+```
+favorite_services
+```
+
+
+```
+[{}]
+```
+
+- objectList of favorite services (service can be added to your favorites in the user dashboard by clicking pin icon in the service list)Example: {}
+
+```
+{}
+```
+
+
+```
+page
+```
+
+
+```
+0
+```
+
+
+```
+country
+```
+
+
+```
+0
+```
+
+
+```
+filter
+```
+
+
+```
+"string"
+```
+
+
+```
+end
+```
+
+
+```
+true
+```
+
+
+```
+favorites
+```
+
+
+```
+{}
+```

@@ -12,7 +12,7 @@ from amazon.core.session import SessionState
 from amazon.core.interaction import InteractionEngine
 from amazon.actions.ebook_search_flow import detect_cart_state
 
-def run_signup_flow(playwright_page, session: SessionState, device) -> bool:
+def run_signup_flow(playwright_page, session: SessionState, device, drop_on_phone: bool = False) -> bool | str:
     """
     Manages the entire signup/login flow loop using SessionState for persistent data.
     """
@@ -139,6 +139,10 @@ def run_signup_flow(playwright_page, session: SessionState, device) -> bool:
 
         # 6. Add Mobile Number
         elif state == "add_mobile":
+            if drop_on_phone:
+                logger.warning("📱 [DROP] Identity is stuck on phone number prompt. Dropping profile as requested.")
+                return "DROPPED_PHONE"
+            
             from amazon.actions.mobile_verification import handle_add_mobile_step
             logger.info("📱 Handling Add Mobile Number step...")
             handle_add_mobile_step(playwright_page, identity.phone, device)

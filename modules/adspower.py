@@ -241,12 +241,13 @@ class AdsPowerProfileManager:
     def delete_profile(self, profile_id):
         # Useful for cleanup
         endpoint = "/api/v2/browser-profile/delete"
-        payload = {"profile_ids": [profile_id]}
+        # 🔑 AdsPower API V2 expects 'profile_id' (singular string key) as a list of strings
+        payload = {"profile_id": [profile_id]}
         try:
             data = self._api_request(endpoint, payload)
             if data is not None:
                 logger.info(f"🗑️ Deleted Profile {profile_id}")
                 return True
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"Failed to delete profile {profile_id}: {e}")
         return False

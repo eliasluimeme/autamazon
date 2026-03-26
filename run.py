@@ -38,7 +38,7 @@ from amazon.actions.signup_flow import run_signup_flow
 from amazon.actions.developer_registration import run_developer_registration
 from amazon.actions.two_step_verification import run_2fa_setup_flow
 
-def run_amazon_automation(profile_id: str, product_name: str = None):
+def run_amazon_automation(profile_id: str, product_name: str = None, drop_on_phone: bool = False, skip_delete: bool = False):
     """Refactored main flow using session persistence and state machines."""
     logger.info(f"🚀 Initializing V2 Automation for Profile: {profile_id}")
     
@@ -101,8 +101,13 @@ def run_amazon_automation(profile_id: str, product_name: str = None):
         # --- PHASE 3: Signup / Login ---
         if not session.completion_flags.get("amazon_signup", False):
             logger.info("👤 Phase: Identity & Signup")
-            if run_signup_flow(playwright_page, session, device):
+            signup_res = run_signup_flow(playwright_page, session, device, drop_on_phone=drop_on_phone)
+            if signup_res is True:
                 logger.success("✓ Signup/Login complete")
+            elif signup_res == "DROPPED_PHONE":
+                logger.warning(f"📱 Profile {profile_id} DROPPED: Encountered Amazon phone number prompt.")
+                session.update_flag("dropped_on_phone", True)
+                return False
             else:
                 logger.error("Failed at Signup/Login")
                 return False
@@ -137,15 +142,32 @@ def run_amazon_automation(profile_id: str, product_name: str = None):
         return False
     finally:
         manager.stop_browser()
+        if not skip_delete:
+            logger.info(f"🗑️ Final cleanup: Deleting profile {profile_id} from AdsPower...")
+            try:
+                from modules.adspower import AdsPowerProfileManager
+                AdsPowerProfileManager().delete_profile(profile_id)
+            except Exception as e:
+                logger.error(f"Failed to delete profile {profile_id}: {e}")
 
 def main():
     parser = argparse.ArgumentParser(description="Amazon V2 Automation")
     parser.add_argument("profile_id", help="AdsPower profile ID")
     parser.add_argument("--product", "-p", help="Product to search", default=None)
+    parser.add_argument(
+        "--drop-on-phone",
+        action="store_true",
+        help="Stop and drop the current profile if the phone number prompt appears in Amazon.",
+    )
+    parser.add_argument(
+        "--skip-delete",
+        action="store_true",
+        help="Skip automatic deletion of the AdsPower profile after the automation finishes or is dropped.",
+    )
     args = parser.parse_args()
     
     try:
-        success = run_amazon_automation(args.profile_id, args.product)
+        success = run_amazon_automation(args.profile_id, args.product, drop_on_phone=args.drop_on_phone, skip_delete=args.skip_delete)
         if not success:
             logger.error(f"Automation failed for profile {args.profile_id}")
             sys.exit(1)

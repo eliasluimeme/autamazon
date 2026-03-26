@@ -11,6 +11,8 @@ Automated product browsing, account creation, and purchasing on Amazon using **A
 - **WebAuthn / Passkey Bypass**: Automatically suppresses native passkey dialogs via CDP virtual authenticators — no manual intervention needed.
 - **OpSec Workflow**: Includes cookie warm-up, human-like typing/scrolling, and randomised delays.
 - **Multi-Profile Orchestration**: Run multiple profiles in parallel with configurable concurrency and automatic retry logic.
+- **Automated Lifecycle**: Automatically handles profile creation, browser configuration, and **automated deletion** upon completion to keep your AdsPower account clean.
+- **Identity Verification (IDV)**: Generates highly realistic, platform-consistent Driver's Licenses (front/back) with shared visual backgrounds for maximum realism.
 - **Multi-Platform**: Supports Windows, macOS, Android, and iOS browser profiles.
 
 ## Prerequisites
@@ -81,6 +83,12 @@ python orchestrator_v3.py --accounts 2
 
 # Run specific profiles in parallel
 python orchestrator_v3.py --profiles id1 id2 id3 --concurrency 3
+
+# Drop profiles that hit phone verification
+python orchestrator_v3.py --accounts 5 --drop-on-phone
+
+# Keep profiles for inspection (skip auto-deletion)
+python orchestrator_v3.py --accounts 2 --skip-delete
 ```
 
 ### Orchestrator Arguments
@@ -96,6 +104,8 @@ python orchestrator_v3.py --profiles id1 id2 id3 --concurrency 3
 | `--max-retries` | `3` | Max retry attempts per profile on failure. |
 | `--skip-outlook-signup` | `False` | Skip Outlook account creation and sign in with an existing credential from `--emails-file` instead. |
 | `--emails-file` | `emails/emails.txt` | Path to the credentials file used when `--skip-outlook-signup` is set. |
+| `--drop-on-phone` | `False` | Automatically "drop" and stop execution for a profile if it hits an Amazon phone number verification prompt. |
+| `--skip-delete` | `False` | Skip the automatic deletion of the AdsPower profile after completion (useful for debugging). |
 
 ### Outlook Sign-in Mode
 
@@ -196,7 +206,9 @@ BobJones99@outlook.com:An0therP@ss
 - **AdsPower Error**: Ensure the AdsPower app is open and the Local API is enabled in settings.
 - **AgentQL Error**: Check your API key in `.env`.
 - **Proxy Error**: Verify your Decodo credentials and balance.
-- **Passkey Loop**: The WebAuthn bypass should handle this automatically. If the browser still shows a native passkey dialog, ensure you're running the latest code — the `setup_webauthn_bypass()` call in `outlook/run.py` pre-emptively suppresses the dialog before Outlook triggers it.
+- **Passkey Loop**: The WebAuthn bypass should handle this automatically. If the browser still shows a native passkey dialog, ensure you're running the latest code.
+- **Phone Verification Drop**: If profiles are being terminated unexpectedly, check if `--drop-on-phone` is enabled. This is intentional to avoid wasting resources on accounts that require manual mobile verification.
+- **Profile Gone?**: By default, the script now deletes AdsPower profiles after a run to save space. Use `--skip-delete` if you need them to persist.
 
 ---
 **Note**: This tool is for educational and testing purposes only.

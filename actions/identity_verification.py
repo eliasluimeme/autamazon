@@ -447,6 +447,8 @@ def detect_idv_state(page) -> str:
 _COUNTRY_TO_DL_CODE = {
     "australia":       "AU",
     "united kingdom":  "GB",
+    "united states":   "US",
+    "usa":             "US",
     "uk":              "GB",
     "germany":         "DE",
     "iceland":         "IS",
@@ -457,6 +459,8 @@ _COUNTRY_TO_DL_CODE = {
 _COUNTRY_TO_CODE = {
     "australia":      "AU",
     "united kingdom": "GB",
+    "united states":  "US",
+    "usa":            "US",
     "uk":             "GB",
     "germany":        "DE",
     "iceland":        "IS",
@@ -471,6 +475,11 @@ def _country_code_for(identity) -> str:
         raw = (identity.country or "").lower()
     elif isinstance(identity, dict):
         raw = (identity.get("country", "") or "").lower()
+    
+    # Handle both codes and full names
+    if raw in ["au", "australia"]: return "AU"
+    if raw in ["us", "usa", "united states"]: return "US"
+    
     return _COUNTRY_TO_DL_CODE.get(raw, "AU")
 
 
@@ -596,8 +605,14 @@ def _generate_dl(identity) -> tuple:
     try:
         from amazon.modules.dl_factory import DLFactory
         factory    = DLFactory()
-        front_path = factory.create_license(dl_identity)
-        back_path  = factory.create_license_back(dl_identity)
+        
+        # Pre-generate a shared background so front and back match
+        # We use a large-enough default and let the factory resize it per side
+        shared_bg = factory.get_random_bg(3000, 2000) 
+        
+        front_path = factory.create_license(dl_identity, bg_image=shared_bg.copy() if shared_bg else None)
+        back_path  = factory.create_license_back(dl_identity, bg_image=shared_bg.copy() if shared_bg else None)
+        
         if front_path:
             logger.success(f"✅ DL front generated: {Path(front_path).name}")
         if back_path:
@@ -605,6 +620,8 @@ def _generate_dl(identity) -> tuple:
         return front_path, back_path
     except Exception as e:
         logger.error(f"DLFactory generation failed: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return None, None
 
 
@@ -960,8 +977,11 @@ def run_identity_verification(playwright_page, session: SessionState, device) ->
             logger.info("📋 PAGE: Document selection — verifying defaults and clicking Continue…")
             _wait_for_page_stable(playwright_page)
 
+            # --- Ensure Country matches Identity ---
+            desired_country = session.identity.country if hasattr(session.identity, "country") else "Australia"
+            desired_country_lower = desired_country.lower()
+
             # Read visible text of each dropdown; fix only if wrong
-            # (use the full button-inner text, not the announce span which can be empty)
             def _dropdown_text(page, selectors) -> str:
                 for sel in selectors:
                     try:
@@ -984,16 +1004,27 @@ def run_identity_verification(playwright_page, session: SessionState, device) ->
 
             country_text = _dropdown_text(playwright_page, COUNTRY_TEXT_SELS)
             logger.info(f"Country dropdown reads: '{country_text or '(undetected)'}' — "
-                        f"{'OK' if 'australia' in country_text or not country_text else 'WRONG'}")
+                        f"{'OK' if desired_country_lower in country_text or not country_text else 'WRONG'}")
 
-            if country_text and "australia" not in country_text:
-                logger.info("Country wrong — correcting…")
-                interaction.smart_click("Country dropdown", selectors=SEL_COUNTRY_DROPDOWN,
-                                        cache_key="idv_country_dropdown")
-                time.sleep(0.6)
-                interaction.smart_click("Australia option", selectors=SEL_AUSTRALIA_OPT,
-                                        cache_key="idv_australia_option")
-                time.sleep(0.8)
+            if country_text and desired_country_lower not in country_text:
+                logger.info(f"Country wrong (Found: {country_text}, Desired: {desired_country_lower}) — correcting…")
+                # Try specific selector logic for better reliability
+                try:
+                    playwright_page.locator(SEL_COUNTRY_DROPDOWN[0]).first.click()
+                    time.sleep(1)
+                    # Search for the option - Amazon's dropdown is a custom SPA widget
+                    playwright_page.locator(f"li:has-text('{desired_country}')").first.click()
+                    time.sleep(1)
+                except Exception as e:
+                    logger.warning(f"Dropdown correction failed, trying smart click: {e}")
+                    interaction.smart_click("Country dropdown", selectors=SEL_COUNTRY_DROPDOWN,
+                                            cache_key="idv_country_dropdown")
+                    time.sleep(0.6)
+                    # For options, we might need to be dynamic
+                    interaction.smart_click(f"{desired_country} option", 
+                                            selectors=[f'li:has-text("{desired_country}")', f'a:has-text("{desired_country}")'],
+                                            cache_key=f"idv_{desired_country_lower}_option")
+                    time.sleep(0.8)
 
             type_text = _dropdown_text(playwright_page, TYPE_TEXT_SELS)
             logger.info(f"Type dropdown reads: '{type_text or '(undetected)'}' — "

@@ -127,11 +127,26 @@ class IdentityGenerator:
                 rows = cursor.fetchall()
                 street_base = random.choice(rows)[0] if rows else fake.street_name()
                 street_num = random.randint(1, 150)
-                
+
                 if country_code in ["US", "CA", "GB", "AU"]:
                     address = f"{street_num} {street_base}"
                 else:
                     address = f"{street_base} {street_num}"
+
+            # --- 4. PHONE ---
+            prefixes = {
+                "AU": ["04", "05"], "US": ["201", "202", "310", "415", "646", "718", "917"],
+                "GB": ["071", "072", "073", "074", "075", "077", "078", "079"],
+                "CA": ["416", "604", "514", "780"], "DE": ["015", "016", "017"],
+                "FR": ["06", "07"], "IT": ["320", "330", "340"],
+            }
+            prefix = random.choice(prefixes.get(country_code, ["555"]))
+            if country_code == "AU":
+                phone = f"{prefix}{random.randint(10000000, 99999999)}"[:9]
+            elif country_code in ["US", "CA"]:
+                phone = f"{prefix}{random.randint(1000000, 9999999)}"
+            else:
+                phone = f"{prefix}{random.randint(1000000, 99999999)}"
 
             return {
                 "first_name": first_name,
@@ -146,6 +161,7 @@ class IdentityGenerator:
                 "city": city,
                 "zip": zipcode,
                 "address": address,
+                "phone": phone,
                 "full_address": f"{address}, {city} {zipcode}"
             }
             
@@ -173,6 +189,12 @@ class IdentityGenerator:
             # Use 'region_name' if passed, otherwise "Unknown"
             fb_state = region_name if region_name else "Unknown"
             
+            fb_prefixes = {
+                "AU": ["04"], "US": ["212"], "GB": ["071"], "CA": ["416"],
+            }
+            fb_prefix = random.choice(fb_prefixes.get(safe_country, ["555"]))
+            fb_phone = f"{fb_prefix}{random.randint(1000000, 9999999)}"
+
             return {
                 "first_name": fb_first_name,
                 "last_name": fake.last_name(),
@@ -186,5 +208,6 @@ class IdentityGenerator:
                 "city": fake.city(),
                 "zip": fake.postcode(),
                 "address": fake.street_address(),
+                "phone": fb_phone,
                 "full_address": f"{fake.street_address()}, {fake.city()} {fake.postcode()}"
             }

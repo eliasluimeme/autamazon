@@ -503,6 +503,8 @@ def _detect_via_selectors(page) -> str:
     except:
         pass
     
+    return "UNKNOWN"
+    
 
 
 def _detect_via_agentql(page, agentql_page) -> str:

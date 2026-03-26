@@ -18,7 +18,7 @@ SELECTORS = {
     },
     
     "skip": {
-        "skip_button": "#iShowSkip, a:has-text('Skip for now'), a:has-text('Skip')"
+        "skip_button": "#iShowSkip, a:has-text('Skip for now'), a:has-text('Skip'), button:has-text('Skip for now')"
     },
     
     "stay_signed_in": {
@@ -26,6 +26,16 @@ SELECTORS = {
         "checkbox": "input[name='DontShowAgain'], input[type='checkbox']",
         "yes_button": "#acceptButton, button:has-text('Yes')",
         "no_button": "#declineButton, #idBtn_Back, button:has-text('No')"
+    },
+
+    "passkey": {
+        "skip_button": "button:has-text('Skip for now'), a:has-text('Skip for now'), button:has-text('Skip')",
+        "cancel_button": "button:has-text('Cancel'), a:has-text('Cancel'), #idBtn_Back:has-text('Cancel')",
+        "header": "h1:has-text('passkey'), h2:has-text('passkey'), h1:has-text('Passkey'), h2:has-text('Passkey')",
+    },
+
+    "privacy": {
+        "ok_button": "button:has-text('OK'), #acceptButton, #idBtn_Accept, button[type='submit']",
     },
     
     "success": {

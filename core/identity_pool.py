@@ -94,17 +94,27 @@ class PooledIdentity:
             from amazon.identity_manager import Identity
         except ImportError:
             from identity_manager import Identity
+        country_map = {"AU": "Australia", "US": "United States", "GB": "United Kingdom", "CA": "Canada"}
+        full_country = country_map.get(self.country_code, "United States")
+        
+        # Generic defaults based on country
+        defaults = {
+            "AU": {"address": "215 Somerton Rd", "city": "Melbourne", "zip": "3048", "state": "Victoria", "phone": "0499304444"},
+            "US": {"address": "1600 Amphitheatre Pkwy", "city": "Mountain View", "zip": "94043", "state": "California", "phone": "6502530000"},
+        }
+        fallback = defaults.get(self.country_code, defaults["US"])
+
         return Identity(
             firstname=self.firstname,
             lastname=self.lastname,
             email=self.outlook_email or f"{self.email_handle}@outlook.com",
             password=self.password,
-            address_line1=self.address_line1 or "215 Somerton Rd",
-            city=self.city or "Melbourne",
-            zip_code=self.zip_code or "3048",
-            state=self.region_state or "Victoria",
-            country=self.country or "Australia",
-            phone=self.phone or "399304444",
+            address_line1=self.address_line1 or fallback["address"],
+            city=self.city or fallback["city"],
+            zip_code=self.zip_code or fallback["zip"],
+            state=self.region_state or fallback["state"],
+            country=self.country or full_country,
+            phone=self.phone or fallback["phone"],
         )
 
 
@@ -335,6 +345,13 @@ class IdentityPool:
             chars = string.ascii_letters + string.digits + "!@#$%^&*"
             password = "".join(random.choice(chars) for _ in range(14))
             
+            # Generic defaults based on country
+            defaults = {
+                "AU": {"address": "215 Somerton Rd", "city": "Melbourne", "zip": "3048", "phone": "0499304444"},
+                "US": {"address": "1600 Amphitheatre Pkwy", "city": "Mountain View", "zip": "94043", "phone": "6502530000"},
+            }
+            fallback = defaults.get(self.country_code, defaults["US"])
+
             identity = PooledIdentity(
                 firstname=base.get("first_name", ""),
                 lastname=base.get("last_name", ""),
@@ -343,11 +360,11 @@ class IdentityPool:
                 dob_month=str(base.get("dob_month", str(random.randint(1, 12)))),
                 dob_day=str(base.get("dob_day", str(random.randint(1, 28)))),
                 dob_year=str(base.get("dob_year", str(random.randint(1980, 2000)))),
-                address_line1=base.get("address", "215 Somerton Rd"),
-                city=base.get("city", "Melbourne"),
-                zip_code=base.get("zip", "3048"),
+                address_line1=base.get("address") or fallback["address"],
+                city=base.get("city") or fallback["city"],
+                zip_code=base.get("zip") or fallback["zip"],
                 country=base.get("country", self.country_code),
-                phone=base.get("phone", "399304444"),
+                phone=base.get("phone") or fallback["phone"],
                 country_code=self.country_code,
             )
             
